@@ -4,15 +4,36 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 const win = getCurrentWindow()
 
 async function minimize() {
-  await win.minimize()
+  try {
+    await win.minimize()
+  } catch (e) {
+    console.error('[titlebar] minimize failed:', e)
+  }
 }
+
 async function toggleMax() {
-  const isMax = await win.isMaximized()
-  if (isMax) await win.unmaximize()
-  else await win.maximize()
+  try {
+    const isMax = await win.isMaximized()
+    if (isMax) await win.unmaximize()
+    else await win.maximize()
+  } catch (e) {
+    console.error('[titlebar] toggle maximize failed:', e)
+  }
 }
+
+// X 按钮 = 隐藏到托盘。直接 hide() 比 close() 更稳，少走"close → Rust 拦截 → hide"。
+// Alt+F4 / 任务栏右键 / OS 级关闭仍由 Rust 端的 CloseRequested 拦截器兜底处理为 hide。
 async function close() {
-  await win.close()
+  try {
+    await win.hide()
+  } catch (e) {
+    console.error('[titlebar] hide failed, falling back to close():', e)
+    try {
+      await win.close()
+    } catch (e2) {
+      console.error('[titlebar] close also failed:', e2)
+    }
+  }
 }
 </script>
 
