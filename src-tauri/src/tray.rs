@@ -209,25 +209,209 @@ fn system_font() -> Option<FontRef<'static>> {
     FontRef::try_from_slice(bytes).ok()
 }
 
-/// 透明背景文字图标 —— 真 TTF 抗锯齿渲染 + 1px 柔投影
-pub fn render_text_icon(text: &str, size: u32, color: (u8, u8, u8)) -> Vec<u8> {
+/// 玻璃卡片风格文字图标 —— 暗色半透明底 + 白字 + 底部彩色状态条
+pub fn render_text_icon(text: &str, size: u32, accent: (u8, u8, u8)) -> Vec<u8> {
     let w = size as usize;
     let h = size as usize;
     let mut buf = vec![0u8; w * h * 4];
+    let s = size as i32;
 
+    let radius = ((size as f32) * 0.24).round() as i32;
+    let dark_glass = (15u8, 23u8, 42u8); // slate-900
+
+    // 1) 暗色玻璃底（半透明，能看到任务栏底色）
+    fill_rounded_rect_aa(&mut buf, w, h, 0, 0, s, s, radius, dark_glass, 215);
+
+    // 2) 顶部高光（玻璃边缘反光感）
+    add_top_highlight(&mut buf, w, h, s, radius);
+
+    // 3) 外圈细描边（白色低透明，定义边缘）
+    draw_rounded_border(&mut buf, w, h, 0, 0, s, s, radius, (255, 255, 255), 70);
+
+    // 4) 底部 accent 状态条（指标颜色，2px 高度）
+    draw_bottom_accent(&mut buf, w, h, s, radius, accent);
+
+    // 5) 白色粗字，居中
     let chars: Vec<char> = text.chars().take(3).collect();
-    if chars.is_empty() {
-        return buf;
-    }
-
-    if let Some(font) = system_font() {
-        render_text_ttf(&mut buf, w, h, &font, &chars, color);
-    } else {
-        // 极端情况下系统字体读不到，回退到老式像素字
-        render_text_pixel(&mut buf, w, h, &chars, color);
+    if !chars.is_empty() {
+        if let Some(font) = system_font() {
+            render_text_ttf(&mut buf, w, h, &font, &chars, (255, 255, 255));
+        } else {
+            render_text_pixel(&mut buf, w, h, &chars, (255, 255, 255));
+        }
     }
 
     buf
+}
+
+// ============================================================
+// 2D 绘图基础原语：4x 超采样抗锯齿圆角矩形 + alpha 混合
+// ============================================================
+fn blend_pixel(buf: &mut [u8], w: usize, x: usize, y: usize, color: (u8, u8, u8), alpha: u8) {
+    if alpha == 0 {
+        return;
+    }
+    let idx = (y * w + x) * 4;
+    let src_a = alpha as u32;
+    let inv = 255u32 - src_a;
+    let dst_a = buf[idx + 3] as u32;
+    buf[idx] = ((color.0 as u32 * src_a + buf[idx] as u32 * inv) / 255) as u8;
+    buf[idx + 1] = ((color.1 as u32 * src_a + buf[idx + 1] as u32 * inv) / 255) as u8;
+    buf[idx + 2] = ((color.2 as u32 * src_a + buf[idx + 2] as u32 * inv) / 255) as u8;
+    buf[idx + 3] = (dst_a + (src_a * (255 - dst_a)) / 255) as u8;
+}
+
+fn inside_rounded_f(x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32, r: f32) -> bool {
+    if x < x0 || x >= x1 || y < y0 || y >= y1 {
+        return false;
+    }
+    let cx = x.clamp(x0 + r, x1 - r);
+    let cy = y.clamp(y0 + r, y1 - r);
+    let dx = x - cx;
+    let dy = y - cy;
+    dx * dx + dy * dy <= r * r
+}
+
+fn fill_rounded_rect_aa(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    r: i32,
+    color: (u8, u8, u8),
+    alpha: u8,
+) {
+    for py in y0..y1 {
+        if py < 0 || py >= h as i32 {
+            continue;
+        }
+        for px in x0..x1 {
+            if px < 0 || px >= w as i32 {
+                continue;
+            }
+            // 4x4 超采样
+            let mut covered = 0u32;
+            for dy in 0..4 {
+                for dx in 0..4 {
+                    let sx = px as f32 + (dx as f32 + 0.5) / 4.0;
+                    let sy = py as f32 + (dy as f32 + 0.5) / 4.0;
+                    if inside_rounded_f(sx, sy, x0 as f32, y0 as f32, x1 as f32, y1 as f32, r as f32) {
+                        covered += 1;
+                    }
+                }
+            }
+            if covered == 0 {
+                continue;
+            }
+            let cov = covered as f32 / 16.0;
+            let a = (alpha as f32 * cov).round() as u8;
+            blend_pixel(buf, w, px as usize, py as usize, color, a);
+        }
+    }
+}
+
+fn draw_rounded_border(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    r: i32,
+    color: (u8, u8, u8),
+    alpha: u8,
+) {
+    // 在外圈 1px 范围内根据是否同时贴合外/内圈来判定描边像素
+    let r_outer = r as f32;
+    let r_inner = (r - 1).max(0) as f32;
+    for py in y0..y1 {
+        if py < 0 || py >= h as i32 {
+            continue;
+        }
+        for px in x0..x1 {
+            if px < 0 || px >= w as i32 {
+                continue;
+            }
+            let cx = px as f32 + 0.5;
+            let cy = py as f32 + 0.5;
+            let in_outer = inside_rounded_f(cx, cy, x0 as f32, y0 as f32, x1 as f32, y1 as f32, r_outer);
+            if !in_outer {
+                continue;
+            }
+            let in_inner = inside_rounded_f(
+                cx,
+                cy,
+                (x0 + 1) as f32,
+                (y0 + 1) as f32,
+                (x1 - 1) as f32,
+                (y1 - 1) as f32,
+                r_inner,
+            );
+            if in_inner {
+                continue;
+            }
+            blend_pixel(buf, w, px as usize, py as usize, color, alpha);
+        }
+    }
+}
+
+/// 顶部 30% 高度处加一道由白到透明的渐变高光，模拟玻璃边缘反光
+fn add_top_highlight(buf: &mut [u8], w: usize, h: usize, s: i32, r: i32) {
+    let highlight_h = (s as f32 * 0.32) as i32;
+    for py in 0..highlight_h {
+        if py >= h as i32 {
+            break;
+        }
+        // 从顶部往下衰减：top = alpha 60, bottom = 0
+        let t = py as f32 / highlight_h as f32;
+        let a = ((1.0 - t) * 55.0) as u8;
+        for px in 0..s {
+            if px < 0 || px >= w as i32 {
+                continue;
+            }
+            let cx = px as f32 + 0.5;
+            let cy = py as f32 + 0.5;
+            if !inside_rounded_f(cx, cy, 0.5, 0.5, s as f32 - 0.5, s as f32 - 0.5, r as f32) {
+                continue;
+            }
+            blend_pixel(buf, w, px as usize, py as usize, (255, 255, 255), a);
+        }
+    }
+}
+
+/// 底部 2px 状态条（指标颜色）
+fn draw_bottom_accent(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    s: i32,
+    r: i32,
+    color: (u8, u8, u8),
+) {
+    let bar_h = (s as f32 * 0.10).round().max(2.0) as i32;
+    let bar_top = s - bar_h - 2; // 距底边 2px 余量
+    let inset = (s as f32 * 0.18) as i32;
+    for py in bar_top..(bar_top + bar_h) {
+        if py < 0 || py >= h as i32 {
+            continue;
+        }
+        for px in inset..(s - inset) {
+            if px < 0 || px >= w as i32 {
+                continue;
+            }
+            // 让状态条也跟随圆角形状
+            let cx = px as f32 + 0.5;
+            let cy = py as f32 + 0.5;
+            if !inside_rounded_f(cx, cy, 0.0, 0.0, s as f32, s as f32, r as f32) {
+                continue;
+            }
+            blend_pixel(buf, w, px as usize, py as usize, color, 255);
+        }
+    }
 }
 
 fn render_text_ttf(
@@ -238,9 +422,9 @@ fn render_text_ttf(
     chars: &[char],
     color: (u8, u8, u8),
 ) {
-    // 二分挑选合适字号：填满图标，但不超出
-    let max_w = (w as f32) * 0.96;
-    let max_h = (h as f32) * 0.85;
+    // 给底部 accent 条留 ~20% 空间，文字在上方 75% 区域内尽量大
+    let max_w = (w as f32) * 0.78;
+    let max_h = (h as f32) * 0.62;
     let mut lo: f32 = 6.0;
     let mut hi: f32 = h as f32 * 1.4;
     let mut best_scale = lo;
@@ -266,12 +450,11 @@ fn render_text_ttf(
         .map(|c| sized.h_advance(sized.scaled_glyph(*c).id))
         .sum();
     let start_x = ((w as f32) - advance) / 2.0;
-    // 视觉上让文字垂直居中：用 ascent 高度的一半上下偏移
-    let baseline = ((h as f32) + sized.ascent() * 0.78) / 2.0;
+    // 把文字垂直居中放进"顶部 80%"区域 —— 给底部 accent 条让位
+    let upper_h = h as f32 * 0.82;
+    let baseline = (upper_h + sized.ascent() * 0.78) / 2.0;
 
-    // Pass 1：柔投影 (+1, +1)，黑色 55% alpha
-    draw_text_pass(buf, w, h, &sized, chars, start_x + 1.0, baseline + 1.0, (0, 0, 0), 0.55);
-    // Pass 2：主色文字
+    // 白字直接画 —— 暗色玻璃底反差天然够大，不需要投影
     draw_text_pass(buf, w, h, &sized, chars, start_x, baseline, color, 1.0);
 }
 
@@ -557,4 +740,30 @@ pub fn temp_bg(t: f32) -> (u8, u8, u8) {
 
 pub fn geo_bg() -> (u8, u8, u8) {
     (0x2d, 0xd4, 0xbf) // teal-400 —— 亮一档
+}
+
+#[cfg(test)]
+mod preview {
+    use super::*;
+
+    #[test]
+    fn save_preview_icons() {
+        let cases = [
+            ("preview_cpu_low.png", "27", cpu_bg(20.0)),
+            ("preview_cpu_mid.png", "58", cpu_bg(50.0)),
+            ("preview_cpu_high.png", "92", cpu_bg(92.0)),
+            ("preview_temp_mid.png", "58", temp_bg(58.0)),
+            ("preview_temp_hot.png", "85", temp_bg(85.0)),
+            ("preview_geo_cn.png", "CN", geo_bg()),
+            ("preview_geo_us.png", "US", geo_bg()),
+        ];
+        for (name, text, color) in cases {
+            let buf = render_text_icon(text, 64, color);
+            let img = image::RgbaImage::from_raw(64, 64, buf).expect("RgbaImage");
+            let path = std::path::Path::new("target").join(name);
+            std::fs::create_dir_all("target").ok();
+            img.save(&path).expect("save png");
+            println!("wrote {:?}", path);
+        }
+    }
 }
