@@ -91,7 +91,7 @@ pub fn render_icon_with_cpu(cpu_pct: f32) -> Vec<u8> {
 
 fn cpu_color(pct: f32) -> (u8, u8, u8) {
     if pct < 30.0 {
-        (0x10, 0xb9, 0x81) // emerald
+        (0x10, 0xb9, 0x81) // emerald (主图标底部进度条仍用饱和色)
     } else if pct < 70.0 {
         (0xfb, 0xbf, 0x24) // amber
     } else {
@@ -99,13 +99,24 @@ fn cpu_color(pct: f32) -> (u8, u8, u8) {
     }
 }
 
-fn temp_color(t: f32) -> (u8, u8, u8) {
-    if t < 50.0 {
-        (0x10, 0xb9, 0x81) // emerald
-    } else if t < 75.0 {
-        (0xf9, 0x73, 0x16) // orange
+/// 文字图标用的"亮一档"颜色 —— 在深色任务栏上更醒目
+fn cpu_text_color(pct: f32) -> (u8, u8, u8) {
+    if pct < 30.0 {
+        (0x34, 0xd3, 0x99) // emerald-400
+    } else if pct < 70.0 {
+        (0xfc, 0xd3, 0x4d) // amber-300
     } else {
-        (0xef, 0x44, 0x44) // red
+        (0xf8, 0x71, 0x71) // red-400
+    }
+}
+
+fn temp_text_color(t: f32) -> (u8, u8, u8) {
+    if t < 50.0 {
+        (0x34, 0xd3, 0x99) // emerald-400
+    } else if t < 75.0 {
+        (0xfb, 0x92, 0x3c) // orange-400
+    } else {
+        (0xf8, 0x71, 0x71) // red-400
     }
 }
 
@@ -160,67 +171,91 @@ fn glyph(c: char) -> Option<[u8; GLYPH_H]> {
     })
 }
 
-/// 渲染一个文字托盘图标。
+/// 渲染一个文字托盘图标（透明背景）。
 /// - size: 图标边长（像素）
-/// - text: 最多 3 个字符，自动居中
-/// - bg: 背景圆角方块颜色 (RGB)
+/// - text: 最多 3 个字符，自动居中并按可用空间缩放
+/// - color: 文字主色（RGB）；外圈自动加 1px 深色描边保证浅色/深色任务栏都能看清
 /// 返回 RGBA buffer。
-pub fn render_text_icon(text: &str, size: u32, bg: (u8, u8, u8)) -> Vec<u8> {
+pub fn render_text_icon(text: &str, size: u32, color: (u8, u8, u8)) -> Vec<u8> {
     let w = size as usize;
     let h = size as usize;
-    let mut buf = vec![0u8; w * h * 4];
+    let mut buf = vec![0u8; w * h * 4]; // 完全透明
 
-    // 1) 圆角方块背景
-    let margin = ((size as f32) * 0.04).round() as i32;
-    let bg_radius = ((size as f32) * 0.22).round() as i32;
-    let x0 = margin;
-    let y0 = margin;
-    let x1 = (size as i32) - margin;
-    let y1 = (size as i32) - margin;
-    for y in 0..(h as i32) {
-        for x in 0..(w as i32) {
-            if !inside_rounded(x, y, x0, y0, x1, y1, bg_radius) {
-                continue;
-            }
-            let idx = ((y as usize) * w + (x as usize)) * 4;
-            buf[idx] = bg.0;
-            buf[idx + 1] = bg.1;
-            buf[idx + 2] = bg.2;
-            buf[idx + 3] = 255;
-        }
-    }
-
-    // 2) 计算文字布局：把 text 中能识别的字符画出来
     let chars: Vec<char> = text.chars().take(3).collect();
     if chars.is_empty() {
         return buf;
     }
     let n = chars.len();
-    // 字符之间留 1*scale px 间距
-    let text_inner_margin = ((size as f32) * 0.10).round() as usize;
-    let avail_w = w.saturating_sub(text_inner_margin * 2);
-    let avail_h = h.saturating_sub(text_inner_margin * 2);
-    // 每字最大可用宽度
-    let per_char_w = if n == 1 {
-        avail_w
-    } else {
-        avail_w.saturating_sub(n - 1) / n
-    };
-    let scale_w = per_char_w / GLYPH_W;
+    let gap_units = 1usize; // 字符间留 1 个 scale 的间隙
+
+    // 留 2px 给描边，避免文字贴边被切
+    let avail_w = w.saturating_sub(2);
+    let avail_h = h.saturating_sub(2);
+    let total_gaps = gap_units * n.saturating_sub(1);
+    let per_char_glyphs = (avail_w.saturating_sub(total_gaps) / n) / GLYPH_W;
     let scale_h = avail_h / GLYPH_H;
-    let scale = scale_w.min(scale_h).max(1);
-    let text_w = scale * GLYPH_W * n + scale.saturating_sub(0).max(1) * (n.saturating_sub(1));
+    let scale = per_char_glyphs.min(scale_h).max(1);
+
+    let text_w = scale * GLYPH_W * n + scale * gap_units * n.saturating_sub(1);
     let text_h = scale * GLYPH_H;
     let start_x = (w.saturating_sub(text_w)) / 2;
     let start_y = (h.saturating_sub(text_h)) / 2;
 
-    // 3) 绘制每个字符（白色，仅在背景之上）
+    // Pass 1：8 邻居方向的深色描边（在任何颜色任务栏上都能凸显文字边缘）
+    let outline = (15u8, 15u8, 15u8);
+    for &(dx, dy) in &[
+        (-1i32, -1i32),
+        (0, -1),
+        (1, -1),
+        (-1, 0),
+        (1, 0),
+        (-1, 1),
+        (0, 1),
+        (1, 1),
+    ] {
+        draw_chars(
+            &mut buf,
+            w,
+            h,
+            &chars,
+            start_x as i32 + dx,
+            start_y as i32 + dy,
+            scale,
+            gap_units,
+            outline,
+        );
+    }
+
+    // Pass 2：主色文字盖在描边之上
+    draw_chars(
+        &mut buf,
+        w,
+        h,
+        &chars,
+        start_x as i32,
+        start_y as i32,
+        scale,
+        gap_units,
+        color,
+    );
+
+    buf
+}
+
+fn draw_chars(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    chars: &[char],
+    start_x: i32,
+    start_y: i32,
+    scale: usize,
+    gap_units: usize,
+    color: (u8, u8, u8),
+) {
     for (i, c) in chars.iter().enumerate() {
-        let g = match glyph(*c) {
-            Some(g) => g,
-            None => continue,
-        };
-        let cx = start_x + i * (scale * GLYPH_W + scale.max(1));
+        let Some(g) = glyph(*c) else { continue };
+        let cx = start_x + (i * (scale * GLYPH_W + scale * gap_units)) as i32;
         for (row, bits) in g.iter().enumerate() {
             for col in 0..GLYPH_W {
                 if (bits >> (GLYPH_W - 1 - col)) & 1 == 0 {
@@ -228,36 +263,21 @@ pub fn render_text_icon(text: &str, size: u32, bg: (u8, u8, u8)) -> Vec<u8> {
                 }
                 for dy in 0..scale {
                     for dx in 0..scale {
-                        let px = cx + col * scale + dx;
-                        let py = start_y + row * scale + dy;
-                        if px >= w || py >= h {
+                        let px = cx + (col * scale + dx) as i32;
+                        let py = start_y + (row * scale + dy) as i32;
+                        if px < 0 || px >= w as i32 || py < 0 || py >= h as i32 {
                             continue;
                         }
-                        let idx = (py * w + px) * 4;
-                        if buf[idx + 3] == 0 {
-                            continue;
-                        }
-                        buf[idx] = 255;
-                        buf[idx + 1] = 255;
-                        buf[idx + 2] = 255;
+                        let idx = ((py as usize) * w + (px as usize)) * 4;
+                        buf[idx] = color.0;
+                        buf[idx + 1] = color.1;
+                        buf[idx + 2] = color.2;
+                        buf[idx + 3] = 255;
                     }
                 }
             }
         }
     }
-
-    buf
-}
-
-fn inside_rounded(x: i32, y: i32, x0: i32, y0: i32, x1: i32, y1: i32, r: i32) -> bool {
-    if x < x0 || x >= x1 || y < y0 || y >= y1 {
-        return false;
-    }
-    let cx = x.clamp(x0 + r, x1 - r - 1);
-    let cy = y.clamp(y0 + r, y1 - r - 1);
-    let dx = x - cx;
-    let dy = y - cy;
-    dx * dx + dy * dy <= r * r
 }
 
 // ============================================================
@@ -450,14 +470,15 @@ pub fn temp_text(t: f32) -> String {
     format!("{:.0}", t.clamp(0.0, 99.0))
 }
 
+// 文字图标用的"亮档"颜色 —— 透明背景上更醒目
 pub fn cpu_bg(pct: f32) -> (u8, u8, u8) {
-    cpu_color(pct)
+    cpu_text_color(pct)
 }
 
 pub fn temp_bg(t: f32) -> (u8, u8, u8) {
-    temp_color(t)
+    temp_text_color(t)
 }
 
 pub fn geo_bg() -> (u8, u8, u8) {
-    (0x0d, 0x94, 0x88) // teal-600
+    (0x2d, 0xd4, 0xbf) // teal-400 —— 亮一档
 }
