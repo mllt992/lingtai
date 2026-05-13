@@ -1,0 +1,124 @@
+/* ========================================================================
+   凌台 · Loft 主题系统
+   通过 [data-theme] 切换；所有颜色走 CSS 变量；--accent 可被用户覆盖
+   ======================================================================== */
+
+:root {
+  --font-sans: 'Inter', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Consolas', monospace;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --shadow-card: 0 2px 12px rgba(0, 0, 0, 0.08);
+  --shadow-elev: 0 8px 32px rgba(0, 0, 0, 0.12);
+}
+
+/* ---------- Aurora 极光（默认深色） ---------- */
+:root,
+[data-theme='aurora'] {
+  --bg: #0b1020;
+  --bg-soft: #0f1730;
+  --bg-card: #141d3a;
+  --bg-elev: #1c2649;
+  --border: #233059;
+  --text: #e6edff;
+  --text-muted: #8a96bd;
+  --accent: #5b8cff;
+  --accent-soft: rgba(91, 140, 255, 0.16);
+  --success: #4ade80;
+  --warning: #fbbf24;
+  --danger: #f87171;
+  --titlebar: rgba(11, 16, 32, 0.7);
+  --grid: rgba(91, 140, 255, 0.08);
+}
+
+/* ---------- Carbon 碳灰（OLED 友好） ---------- */
+[data-theme='carbon'] {
+  --bg: #050505;
+  --bg-soft: #0c0c0c;
+  --bg-card: #131313;
+  --bg-elev: #1d1d1d;
+  --border: #2a2a2a;
+  --text: #f0f0f0;
+  --text-muted: #8a8a8a;
+  --accent: #ff6b35;
+  --accent-soft: rgba(255, 107, 53, 0.16);
+  --success: #4ade80;
+  --warning: #facc15;
+  --danger: #ef4444;
+  --titlebar: rgba(5, 5, 5, 0.85);
+  --grid: rgba(255, 107, 53, 0.08);
+}
+
+/* ---------- Vanilla 米白（护眼浅色） ---------- */
+[data-theme='vanilla'] {
+  --bg: #fbf9f4;
+  --bg-soft: #f3efe5;
+  --bg-card: #ffffff;
+  --bg-elev: #faf6ec;
+  --border: #e6dfd0;
+  --text: #2a2620;
+  --text-muted: #7a7062;
+  --accent: #b07b3a;
+  --accent-soft: rgba(176, 123, 58, 0.12);
+  --success: #2f8e5e;
+  --warning: #c98a1a;
+  --danger: #c64a3c;
+  --titlebar: rgba(251, 249, 244, 0.85);
+  --grid: rgba(176, 123, 58, 0.08);
+}
+
+/* ---------- Nord 北欧 ---------- */
+[data-theme='nord'] {
+  --bg: #2e3440;
+  --bg-soft: #3b4252;
+  --bg-card: #434c5e;
+  --bg-elev: #4c566a;
+  --border: #4c566a;
+  --text: #eceff4;
+  --text-muted: #a1adc7;
+  --accent: #88c0d0;
+  --accent-soft: rgba(136, 192, 208, 0.18);
+  --success: #a3be8c;
+  --warning: #ebcb8b;
+  --danger: #bf616a;
+  --titlebar: rgba(46, 52, 64, 0.85);
+  --grid: rgba(136, 192, 208, 0.08);
+}
+
+/* ---------- Solar 暖橙（暖色阅读） ---------- */
+[data-theme='solar'] {
+  --bg: #fdf6e3;
+  --bg-soft: #eee8d5;
+  --bg-card: #ffffff;
+  --bg-elev: #f9f1d8;
+  --border: #e3d8b8;
+  --text: #586e75;
+  --text-muted: #93a1a1;
+  --accent: #cb4b16;
+  --accent-soft: rgba(203, 75, 22, 0.12);
+  --success: #859900;
+  --warning: #b58900;
+  --danger: #dc322f;
+  --titlebar: rgba(253, 246, 227, 0.85);
+  --grid: rgba(203, 75, 22, 0.08);
+}
+
+/* ---------- Mint 薄荷（清新浅色） ---------- */
+[data-theme='mint'] {
+  --bg: #f1faf6;
+  --bg-soft: #e3f3ec;
+  --bg-card: #ffffff;
+  --bg-elev: #ddf0e5;
+  --border: #c4e3d2;
+  --text: #1c3b2e;
+  --text-muted: #6b8c7a;
+  --accent: #16a085;
+  --accent-soft: rgba(22, 160, 133, 0.14);
+  --success: #16a085;
+  --warning: #d4a72c;
+  --danger: #d65a4f;
+  --titlebar: rgba(241, 250, 246, 0.85);
+  --grid: rgba(22, 160, 133, 0.08);
+}
