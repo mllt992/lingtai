@@ -1,5 +1,6 @@
 mod commands;
 mod state;
+mod tray;
 
 use state::AppState;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -30,6 +31,50 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+/// 在后台线程里每 2 秒刷新一次托盘的 tooltip 和图标（CPU 条）。
+/// 公网 IP / 国家 5 分钟才再请求一次，避免频繁外网调用。
+fn spawn_tray_updater(app_handle: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        // 进程启动时先尝试拿一次地理位置（不阻塞，失败就稍后再试）
+        tray::maybe_refresh_geo();
+
+        loop {
+            // 1) 读 CPU / 内存（复用 AppState 里的 sysinfo 句柄）
+            let (cpu_pct, mem_pct) = {
+                let state = app_handle.state::<AppState>();
+                let mut sys = state.sys.lock();
+                sys.refresh_cpu_usage();
+                sys.refresh_memory();
+                let cpu = sys.global_cpu_usage();
+                let mem = if sys.total_memory() > 0 {
+                    (sys.used_memory() as f32 / sys.total_memory() as f32) * 100.0
+                } else {
+                    0.0
+                };
+                (cpu, mem)
+            };
+            let temp = tray::read_cpu_temp();
+            tray::maybe_refresh_geo();
+            let geo = tray::current_geo();
+
+            // 2) 更新托盘
+            if let Some(tray_icon) = app_handle.tray_by_id("loft-tray") {
+                // tooltip：多行
+                let tip = tray::format_tooltip(cpu_pct, mem_pct, temp, geo.as_ref());
+                let _ = tray_icon.set_tooltip(Some(tip));
+
+                // 图标：基础 LOGO + 底部 CPU 进度条
+                let base = tray::base_icon();
+                let rgba = tray::render_icon_with_cpu(cpu_pct);
+                let image = tauri::image::Image::new_owned(rgba, base.width, base.height);
+                let _ = tray_icon.set_icon(Some(image));
+            }
+
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     install_panic_filter();
@@ -41,7 +86,6 @@ pub fn run() {
         .manage(AppState::new())
         .setup(|app| {
             // ===== 系统托盘 =====
-            // 菜单：显示主窗口 / ─── / 退出
             let show_item = MenuItem::with_id(app, "tray-show", "显示主窗口", true, None::<&str>)?;
             let sep = PredefinedMenuItem::separator(app)?;
             let quit_item = MenuItem::with_id(app, "tray-quit", "退出 Loft", true, None::<&str>)?;
@@ -53,21 +97,18 @@ pub fn run() {
                 .expect("window icon should be configured in tauri.conf.json");
 
             TrayIconBuilder::with_id("loft-tray")
-                .tooltip("凌台 · Loft（点击显示主窗口）")
+                .tooltip("凌台 · Loft")
                 .icon(icon)
                 .menu(&menu)
-                // 左键自定义处理（默认行为是弹菜单，我们改成"切换窗口可见性"）
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "tray-show" => show_main_window(app),
                     "tray-quit" => {
-                        // 真退出：跳过窗口 CloseRequested 拦截
                         app.exit(0);
                     }
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
-                    // 单击左键 → 切换主窗口可见性
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
@@ -87,6 +128,9 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            // ===== 后台更新器：CPU 条 + 多行 tooltip =====
+            spawn_tray_updater(app.handle().clone());
 
             Ok(())
         })
