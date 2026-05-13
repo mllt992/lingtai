@@ -1,18 +1,40 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import TitleBar from '@/components/TitleBar.vue'
 import Sidebar from '@/components/Sidebar.vue'
+import HudView from '@/views/HudView.vue'
 import { useSettingsStore } from '@/stores/settings'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 
 const settings = useSettingsStore()
+const winLabel = ref<string>('main')
+
+// 判定当前窗口是 main 还是 hud
+// label === 'hud' 或 URL 含 hud=1 都视为 HUD
+const isHud = computed(() => {
+  if (winLabel.value === 'hud') return true
+  if (typeof window !== 'undefined') {
+    return window.location.search.includes('hud=1')
+  }
+  return false
+})
 
 onMounted(async () => {
-  await settings.load()
+  try {
+    winLabel.value = getCurrentWindow().label
+  } catch {
+    winLabel.value = 'main'
+  }
+  // 只有主窗口加载用户设置（HUD 不需要）
+  if (!isHud.value) {
+    await settings.load()
+  }
 })
 </script>
 
 <template>
-  <div class="app-shell">
+  <HudView v-if="isHud" />
+  <div v-else class="app-shell">
     <TitleBar />
     <div class="app-body">
       <Sidebar />

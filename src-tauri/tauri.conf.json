@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "凌台 · Loft",
         "width": 1180,
         "height": 760,
@@ -22,6 +23,21 @@
         "resizable": true,
         "fullscreen": false,
         "center": true
+      },
+      {
+        "label": "hud",
+        "title": "Loft HUD",
+        "url": "index.html?hud=1",
+        "width": 360,
+        "height": 40,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "shadow": false,
+        "focus": false,
+        "visible": false
       }
     ],
     "security": {

@@ -6,14 +6,9 @@ use state::AppState;
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Manager, WindowEvent};
-
-const TRAY_TEXT_SIZE: u32 = 32;
+use tauri::{Emitter, Manager, PhysicalPosition, WindowEvent};
 
 const TRAY_MAIN: &str = "loft-main";
-const TRAY_CPU: &str = "loft-cpu";
-const TRAY_TEMP: &str = "loft-temp";
-const TRAY_GEO: &str = "loft-geo";
 
 fn install_panic_filter() {
     let prev = std::panic::take_hook();
@@ -35,15 +30,41 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
-/// 后台线程：每 2 秒刷新所有托盘图标的内容（图像 + tooltip）。
-/// 公网 IP / 国家 5 分钟才再请求一次（失败 30 秒后重试）。
-fn spawn_tray_updater(app_handle: tauri::AppHandle) {
+fn toggle_hud(app: &tauri::AppHandle) {
+    if let Some(hud) = app.get_webview_window("hud") {
+        let visible = hud.is_visible().unwrap_or(false);
+        if visible {
+            let _ = hud.hide();
+        } else {
+            let _ = hud.show();
+        }
+    }
+}
+
+/// 把 HUD 定位到主显示器右上角，离边缘留 12 px
+fn position_hud_top_right(hud: &tauri::WebviewWindow) {
+    if let Ok(Some(monitor)) = hud.primary_monitor() {
+        let mon_pos = monitor.position();
+        let mon_size = monitor.size();
+        // outer_size 在某些时候是 0，先用配置的物理大小估算
+        let hud_w = hud
+            .outer_size()
+            .map(|s| s.width as i32)
+            .unwrap_or((360.0 * monitor.scale_factor()) as i32);
+        let margin_x = (12.0 * monitor.scale_factor()) as i32;
+        let margin_y = (12.0 * monitor.scale_factor()) as i32;
+        let x = mon_pos.x + mon_size.width as i32 - hud_w - margin_x;
+        let y = mon_pos.y + margin_y;
+        let _ = hud.set_position(PhysicalPosition { x, y });
+    }
+}
+
+/// 后台线程：每 2 秒采集指标，给 HUD 发 event，给主托盘更新图标 + tooltip
+fn spawn_metrics_loop(app_handle: tauri::AppHandle) {
     std::thread::spawn(move || {
-        // 启动后先打一次（不阻塞主线程，结果异步可用）
         tray::maybe_refresh_geo();
 
         loop {
-            // ===== 读取所有指标 =====
             let (cpu_pct, mem_pct) = {
                 let state = app_handle.state::<AppState>();
                 let mut sys = state.sys.lock();
@@ -61,13 +82,13 @@ fn spawn_tray_updater(app_handle: tauri::AppHandle) {
             tray::maybe_refresh_geo();
             let geo = tray::current_geo();
 
-            // ===== 主图标：LOGO + CPU 进度条 + 综合 tooltip =====
-            if let Some(tray) = app_handle.tray_by_id(TRAY_MAIN) {
+            // 1) 更新主托盘图标 + tooltip
+            if let Some(tray_icon) = app_handle.tray_by_id(TRAY_MAIN) {
                 let base = tray::base_icon();
                 let rgba = tray::render_icon_with_cpu(cpu_pct);
                 let image = Image::new_owned(rgba, base.width, base.height);
-                let _ = tray.set_icon(Some(image));
-                let _ = tray.set_tooltip(Some(tray::format_main_tooltip(
+                let _ = tray_icon.set_icon(Some(image));
+                let _ = tray_icon.set_tooltip(Some(tray::format_main_tooltip(
                     cpu_pct,
                     mem_pct,
                     temp,
@@ -75,54 +96,9 @@ fn spawn_tray_updater(app_handle: tauri::AppHandle) {
                 )));
             }
 
-            // ===== CPU 数字图标 =====
-            if let Some(tray) = app_handle.tray_by_id(TRAY_CPU) {
-                let txt = tray::cpu_text(cpu_pct);
-                let bg = tray::cpu_bg(cpu_pct);
-                let rgba = tray::render_text_icon(&txt, TRAY_TEXT_SIZE, bg);
-                let image = Image::new_owned(rgba, TRAY_TEXT_SIZE, TRAY_TEXT_SIZE);
-                let _ = tray.set_icon(Some(image));
-                let _ = tray.set_tooltip(Some(format!("CPU {:.1}%  内存 {:.1}%", cpu_pct, mem_pct)));
-            }
-
-            // ===== 温度图标：拿不到就隐藏 =====
-            if let Some(tray) = app_handle.tray_by_id(TRAY_TEMP) {
-                match temp {
-                    Some(t) => {
-                        let txt = tray::temp_text(t);
-                        let bg = tray::temp_bg(t);
-                        let rgba = tray::render_text_icon(&txt, TRAY_TEXT_SIZE, bg);
-                        let image = Image::new_owned(rgba, TRAY_TEXT_SIZE, TRAY_TEXT_SIZE);
-                        let _ = tray.set_icon(Some(image));
-                        let _ = tray.set_tooltip(Some(format!("CPU 温度 {:.0} °C", t)));
-                        let _ = tray.set_visible(true);
-                    }
-                    None => {
-                        let _ = tray.set_visible(false);
-                    }
-                }
-            }
-
-            // ===== 国家图标：拿不到就隐藏 =====
-            if let Some(tray) = app_handle.tray_by_id(TRAY_GEO) {
-                match geo.as_ref() {
-                    Some(g) => {
-                        let bg = tray::geo_bg();
-                        let rgba = tray::render_text_icon(&g.country, TRAY_TEXT_SIZE, bg);
-                        let image = Image::new_owned(rgba, TRAY_TEXT_SIZE, TRAY_TEXT_SIZE);
-                        let _ = tray.set_icon(Some(image));
-                        let mut tip = format!("{} · {}", g.country, g.ip);
-                        if let Some(city) = &g.city {
-                            tip.push_str(&format!(" · {}", city));
-                        }
-                        let _ = tray.set_tooltip(Some(tip));
-                        let _ = tray.set_visible(true);
-                    }
-                    None => {
-                        let _ = tray.set_visible(false);
-                    }
-                }
-            }
+            // 2) emit "metrics" 给 HUD（HUD 监听这个事件渲染）
+            let payload = tray::build_metrics(cpu_pct, mem_pct, temp, geo.as_ref());
+            let _ = app_handle.emit("metrics", payload);
 
             std::thread::sleep(std::time::Duration::from_secs(2));
         }
@@ -139,11 +115,16 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState::new())
         .setup(|app| {
-            // ===== 主托盘 (LOGO + 菜单) =====
-            let show_item = MenuItem::with_id(app, "tray-show", "显示主窗口", true, None::<&str>)?;
+            // ===== 系统托盘 (单个 LOGO 图标 + 菜单) =====
+            let show_item =
+                MenuItem::with_id(app, "tray-show", "显示主窗口", true, None::<&str>)?;
+            let hud_item =
+                MenuItem::with_id(app, "tray-hud", "切换数据面板", true, None::<&str>)?;
             let sep = PredefinedMenuItem::separator(app)?;
-            let quit_item = MenuItem::with_id(app, "tray-quit", "退出 Loft", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_item, &sep, &quit_item])?;
+            let quit_item =
+                MenuItem::with_id(app, "tray-quit", "退出 Loft", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_item, &hud_item, &sep, &quit_item])?;
+
             let main_icon = app
                 .default_window_icon()
                 .cloned()
@@ -156,9 +137,8 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "tray-show" => show_main_window(app),
-                    "tray-quit" => {
-                        app.exit(0);
-                    }
+                    "tray-hud" => toggle_hud(app),
+                    "tray-quit" => app.exit(0),
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -182,63 +162,23 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // ===== 文字数据图标（CPU / 温度 / 国家） =====
-            // 占位图标：先用一个 "--" 图，后台线程立刻会覆盖
-            let placeholder_cpu =
-                tray::render_text_icon("--", TRAY_TEXT_SIZE, (0x10, 0xb9, 0x81));
-            let placeholder_temp =
-                tray::render_text_icon("--", TRAY_TEXT_SIZE, (0xf9, 0x73, 0x16));
-            let placeholder_geo =
-                tray::render_text_icon("--", TRAY_TEXT_SIZE, tray::geo_bg());
-
-            TrayIconBuilder::with_id(TRAY_CPU)
-                .tooltip("CPU 占用")
-                .icon(Image::new_owned(
-                    placeholder_cpu,
-                    TRAY_TEXT_SIZE,
-                    TRAY_TEXT_SIZE,
-                ))
-                .show_menu_on_left_click(false)
-                .on_tray_icon_event(|tray, event| open_window_on_click(tray, &event))
-                .build(app)?;
-
-            TrayIconBuilder::with_id(TRAY_TEMP)
-                .tooltip("CPU 温度")
-                .icon(Image::new_owned(
-                    placeholder_temp,
-                    TRAY_TEXT_SIZE,
-                    TRAY_TEXT_SIZE,
-                ))
-                .show_menu_on_left_click(false)
-                .on_tray_icon_event(|tray, event| open_window_on_click(tray, &event))
-                .build(app)?;
-            // 温度默认隐藏，拿到读数才显示
-            if let Some(t) = app.tray_by_id(TRAY_TEMP) {
-                let _ = t.set_visible(false);
+            // ===== HUD 窗口：定位到右上角 + 显示 =====
+            if let Some(hud) = app.get_webview_window("hud") {
+                // 等 webview 加载完后再定位（不然 outer_size 可能不准）
+                position_hud_top_right(&hud);
+                let _ = hud.show();
+                let _ = hud.set_always_on_top(true);
             }
 
-            TrayIconBuilder::with_id(TRAY_GEO)
-                .tooltip("公网 IP / 国家")
-                .icon(Image::new_owned(
-                    placeholder_geo,
-                    TRAY_TEXT_SIZE,
-                    TRAY_TEXT_SIZE,
-                ))
-                .show_menu_on_left_click(false)
-                .on_tray_icon_event(|tray, event| open_window_on_click(tray, &event))
-                .build(app)?;
-            if let Some(t) = app.tray_by_id(TRAY_GEO) {
-                let _ = t.set_visible(false);
-            }
-
-            // 后台更新器
-            spawn_tray_updater(app.handle().clone());
+            // ===== 后台数据循环（更新托盘 + emit metrics 给 HUD） =====
+            spawn_metrics_loop(app.handle().clone());
 
             Ok(())
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == "main" {
+                // main 关闭 → 隐藏到托盘；hud 关闭 → 真隐藏
+                if window.label() == "main" || window.label() == "hud" {
                     api.prevent_close();
                     let _ = window.hide();
                 }
@@ -263,20 +203,4 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Loft");
-}
-
-/// 任何托盘图标左键点击都打开/恢复主窗口
-fn open_window_on_click(
-    tray: &tauri::tray::TrayIcon,
-    event: &tauri::tray::TrayIconEvent,
-) {
-    if let TrayIconEvent::Click {
-        button: MouseButton::Left,
-        button_state: MouseButtonState::Up,
-        ..
-    } = event
-    {
-        let app = tray.app_handle();
-        show_main_window(app);
-    }
 }

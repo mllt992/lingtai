@@ -24,6 +24,19 @@ body {
   user-select: none;
 }
 
+/* HUD 窗口：完全透明背景（透出毛玻璃效果） */
+html.hud,
+body.hud,
+html.hud #app,
+body.hud #app {
+  background: transparent !important;
+}
+html.hud, body.hud {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
 button,
 input,
 select,
