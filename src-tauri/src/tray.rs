@@ -1,17 +1,21 @@
 // 托盘实时指标：
 //
 // 设计：多个并列托盘图标，每个图标本身把数字渲染上去（不依赖 tooltip）。
-//   · loft-main —— LOGO + 底部 CPU 进度条 + 菜单（点击显示主窗口、退出）
-//   · loft-cpu  —— "23" 文字图标，emerald 背景
-//   · loft-temp —— "58" 文字图标，amber 背景（拿不到温度时隐藏）
-//   · loft-geo  —— "CN" 文字图标，teal 背景（拿不到 IP 时隐藏）
+//   · loft-main —— LOGO + 底部 CPU 进度条 + 菜单
+//   · loft-cpu  —— "27" 透明背景 + 彩字 + 柔投影
+//   · loft-temp —— "58" 同上（拿不到温度时整个图标隐藏）
+//   · loft-geo  —— "CN" 同上（拿不到 IP 时整个图标隐藏）
 //
-// 实现细节：
-//   - 基础 LOGO 启动时解码一次，缓存在 OnceLock
-//   - 文字渲染走手写 5x7 像素字体（0-9 / A-Z / % / ° / -），无新依赖
-//   - 公网 IP 改用 curl.exe（Win10+ 自带），轮询 4 个端点，更稳
-//   - 温度走 sysinfo::Components（家用机常拿不到，正常现象）
+// 文字渲染：
+//   - 运行时加载 Windows 自带的 Segoe UI Black（seguibl.ttf）
+//   - 通过 ab_glyph 抗锯齿光栅化，避免 5x7 像素字的复古/笨重感
+//   - 1px 黑色柔投影，深/浅任务栏底色都清晰
+//
+// 公网 IP / 国家：
+//   - 走 Windows 10/11 自带的 curl.exe，轮询 4 个端点
+//   - PowerShell Invoke-RestMethod 在某些机器上 TLS/代理/BOM 会静默失败
 
+use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
@@ -171,91 +175,163 @@ fn glyph(c: char) -> Option<[u8; GLYPH_H]> {
     })
 }
 
-/// 渲染一个文字托盘图标（透明背景）。
-/// - size: 图标边长（像素）
-/// - text: 最多 3 个字符，自动居中并按可用空间缩放
-/// - color: 文字主色（RGB）；外圈自动加 1px 深色描边保证浅色/深色任务栏都能看清
-/// 返回 RGBA buffer。
+// ============================================================
+// 系统字体加载（Windows 自带的 Segoe UI Black）
+// ============================================================
+static FONT_BYTES: OnceLock<Vec<u8>> = OnceLock::new();
+
+fn load_system_font_bytes() -> &'static [u8] {
+    FONT_BYTES.get_or_init(|| {
+        // 候选优先级：粗 → 中粗 → 半粗 → 常规 → Arial
+        // 现代 Windows 都自带这些路径下的字体
+        const CANDIDATES: &[&str] = &[
+            "C:\\Windows\\Fonts\\seguibl.ttf",  // Segoe UI Black
+            "C:\\Windows\\Fonts\\segoeuib.ttf", // Segoe UI Bold
+            "C:\\Windows\\Fonts\\seguisb.ttf",  // Segoe UI Semibold
+            "C:\\Windows\\Fonts\\arialbd.ttf",  // Arial Bold
+            "C:\\Windows\\Fonts\\segoeui.ttf",  // Segoe UI Regular
+        ];
+        for path in CANDIDATES {
+            if let Ok(data) = std::fs::read(path) {
+                return data;
+            }
+        }
+        Vec::new()
+    })
+    .as_slice()
+}
+
+fn system_font() -> Option<FontRef<'static>> {
+    let bytes = load_system_font_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    FontRef::try_from_slice(bytes).ok()
+}
+
+/// 透明背景文字图标 —— 真 TTF 抗锯齿渲染 + 1px 柔投影
 pub fn render_text_icon(text: &str, size: u32, color: (u8, u8, u8)) -> Vec<u8> {
     let w = size as usize;
     let h = size as usize;
-    let mut buf = vec![0u8; w * h * 4]; // 完全透明
+    let mut buf = vec![0u8; w * h * 4];
 
     let chars: Vec<char> = text.chars().take(3).collect();
     if chars.is_empty() {
         return buf;
     }
-    let n = chars.len();
-    let gap_units = 1usize; // 字符间留 1 个 scale 的间隙
 
-    // 留 2px 给描边，避免文字贴边被切
-    let avail_w = w.saturating_sub(2);
-    let avail_h = h.saturating_sub(2);
-    let total_gaps = gap_units * n.saturating_sub(1);
-    let per_char_glyphs = (avail_w.saturating_sub(total_gaps) / n) / GLYPH_W;
-    let scale_h = avail_h / GLYPH_H;
-    let scale = per_char_glyphs.min(scale_h).max(1);
-
-    let text_w = scale * GLYPH_W * n + scale * gap_units * n.saturating_sub(1);
-    let text_h = scale * GLYPH_H;
-    let start_x = (w.saturating_sub(text_w)) / 2;
-    let start_y = (h.saturating_sub(text_h)) / 2;
-
-    // Pass 1：8 邻居方向的深色描边（在任何颜色任务栏上都能凸显文字边缘）
-    let outline = (15u8, 15u8, 15u8);
-    for &(dx, dy) in &[
-        (-1i32, -1i32),
-        (0, -1),
-        (1, -1),
-        (-1, 0),
-        (1, 0),
-        (-1, 1),
-        (0, 1),
-        (1, 1),
-    ] {
-        draw_chars(
-            &mut buf,
-            w,
-            h,
-            &chars,
-            start_x as i32 + dx,
-            start_y as i32 + dy,
-            scale,
-            gap_units,
-            outline,
-        );
+    if let Some(font) = system_font() {
+        render_text_ttf(&mut buf, w, h, &font, &chars, color);
+    } else {
+        // 极端情况下系统字体读不到，回退到老式像素字
+        render_text_pixel(&mut buf, w, h, &chars, color);
     }
-
-    // Pass 2：主色文字盖在描边之上
-    draw_chars(
-        &mut buf,
-        w,
-        h,
-        &chars,
-        start_x as i32,
-        start_y as i32,
-        scale,
-        gap_units,
-        color,
-    );
 
     buf
 }
 
-fn draw_chars(
+fn render_text_ttf(
     buf: &mut [u8],
     w: usize,
     h: usize,
+    font: &FontRef<'static>,
     chars: &[char],
-    start_x: i32,
-    start_y: i32,
-    scale: usize,
-    gap_units: usize,
     color: (u8, u8, u8),
 ) {
+    // 二分挑选合适字号：填满图标，但不超出
+    let max_w = (w as f32) * 0.96;
+    let max_h = (h as f32) * 0.85;
+    let mut lo: f32 = 6.0;
+    let mut hi: f32 = h as f32 * 1.4;
+    let mut best_scale = lo;
+    for _ in 0..14 {
+        let mid = (lo + hi) / 2.0;
+        let sized = font.as_scaled(PxScale::from(mid));
+        let advance: f32 = chars
+            .iter()
+            .map(|c| sized.h_advance(sized.scaled_glyph(*c).id))
+            .sum();
+        let cap_h = sized.ascent() - sized.descent();
+        if advance <= max_w && cap_h <= max_h {
+            best_scale = mid;
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+
+    let sized = font.as_scaled(PxScale::from(best_scale));
+    let advance: f32 = chars
+        .iter()
+        .map(|c| sized.h_advance(sized.scaled_glyph(*c).id))
+        .sum();
+    let start_x = ((w as f32) - advance) / 2.0;
+    // 视觉上让文字垂直居中：用 ascent 高度的一半上下偏移
+    let baseline = ((h as f32) + sized.ascent() * 0.78) / 2.0;
+
+    // Pass 1：柔投影 (+1, +1)，黑色 55% alpha
+    draw_text_pass(buf, w, h, &sized, chars, start_x + 1.0, baseline + 1.0, (0, 0, 0), 0.55);
+    // Pass 2：主色文字
+    draw_text_pass(buf, w, h, &sized, chars, start_x, baseline, color, 1.0);
+}
+
+fn draw_text_pass(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    sized: &ab_glyph::PxScaleFont<&FontRef<'static>>,
+    chars: &[char],
+    start_x: f32,
+    baseline: f32,
+    color: (u8, u8, u8),
+    alpha_mul: f32,
+) {
+    let mut cur_x = start_x;
+    for c in chars {
+        let mut g = sized.scaled_glyph(*c);
+        g.position = ab_glyph::point(cur_x, baseline);
+        cur_x += sized.h_advance(g.id);
+        if let Some(outlined) = sized.outline_glyph(g) {
+            let bb = outlined.px_bounds();
+            outlined.draw(|gx, gy, coverage| {
+                let px = bb.min.x as i32 + gx as i32;
+                let py = bb.min.y as i32 + gy as i32;
+                if px < 0 || px >= w as i32 || py < 0 || py >= h as i32 {
+                    return;
+                }
+                let idx = ((py as usize) * w + (px as usize)) * 4;
+                let a = (coverage * alpha_mul * 255.0).round().clamp(0.0, 255.0) as u8;
+                if a == 0 {
+                    return;
+                }
+                // 直接以源覆盖目标的 alpha 混合
+                let src_a = a as u32;
+                let inv = 255u32 - src_a;
+                let dst_a = buf[idx + 3] as u32;
+                buf[idx] = ((color.0 as u32 * src_a + buf[idx] as u32 * inv) / 255) as u8;
+                buf[idx + 1] = ((color.1 as u32 * src_a + buf[idx + 1] as u32 * inv) / 255) as u8;
+                buf[idx + 2] = ((color.2 as u32 * src_a + buf[idx + 2] as u32 * inv) / 255) as u8;
+                buf[idx + 3] = (dst_a + (src_a * (255 - dst_a)) / 255) as u8;
+            });
+        }
+    }
+}
+
+// ----- Fallback：极端情况下系统字体读不到才用 -----
+fn render_text_pixel(buf: &mut [u8], w: usize, h: usize, chars: &[char], color: (u8, u8, u8)) {
+    let n = chars.len();
+    let gap = 1usize;
+    let avail_w = w.saturating_sub(2);
+    let avail_h = h.saturating_sub(2);
+    let per_char = (avail_w.saturating_sub(gap * n.saturating_sub(1)) / n) / GLYPH_W;
+    let scale = per_char.min(avail_h / GLYPH_H).max(1);
+    let text_w = scale * GLYPH_W * n + scale * gap * n.saturating_sub(1);
+    let text_h = scale * GLYPH_H;
+    let sx = (w.saturating_sub(text_w)) / 2;
+    let sy = (h.saturating_sub(text_h)) / 2;
     for (i, c) in chars.iter().enumerate() {
         let Some(g) = glyph(*c) else { continue };
-        let cx = start_x + (i * (scale * GLYPH_W + scale * gap_units)) as i32;
+        let cx = sx + i * (scale * GLYPH_W + scale * gap);
         for (row, bits) in g.iter().enumerate() {
             for col in 0..GLYPH_W {
                 if (bits >> (GLYPH_W - 1 - col)) & 1 == 0 {
@@ -263,12 +339,12 @@ fn draw_chars(
                 }
                 for dy in 0..scale {
                     for dx in 0..scale {
-                        let px = cx + (col * scale + dx) as i32;
-                        let py = start_y + (row * scale + dy) as i32;
-                        if px < 0 || px >= w as i32 || py < 0 || py >= h as i32 {
+                        let px = cx + col * scale + dx;
+                        let py = sy + row * scale + dy;
+                        if px >= w || py >= h {
                             continue;
                         }
-                        let idx = ((py as usize) * w + (px as usize)) * 4;
+                        let idx = (py * w + px) * 4;
                         buf[idx] = color.0;
                         buf[idx + 1] = color.1;
                         buf[idx + 2] = color.2;

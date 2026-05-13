@@ -31,6 +31,7 @@ parking_lot = "0.12"
 once_cell = "1"
 chrono = { version = "0.4", features = ["serde"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+ab_glyph = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 lnk = "0.5"
