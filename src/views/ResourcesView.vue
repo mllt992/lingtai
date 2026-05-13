@@ -7,12 +7,14 @@ import ContextMenu, { type MenuItem } from '@/components/ContextMenu.vue'
 import PromptDialog from '@/components/PromptDialog.vue'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { invoke } from '@tauri-apps/api/core'
-import type { ResourceItem } from '@/types'
+import type { ResourceGroup, ResourceItem, ResourceKind } from '@/types'
 
 const launcher = useLauncherStore()
 
+// 添加资源对话框
 const showAddDialog = ref(false)
-const addKind = ref<ResourceItem['kind']>('folder')
+const addKind = ref<ResourceKind>('folder')
+const addTargetGroupId = ref('')
 const newName = ref('')
 const newPath = ref('')
 const dropHint = ref(false)
@@ -22,32 +24,57 @@ const ctxOpen = ref(false)
 const ctxPos = ref({ x: 0, y: 0 })
 const ctxItems = ref<MenuItem[]>([])
 
-// 重命名 prompt
-const renameOpen = ref(false)
-const renaming = ref<ResourceItem | null>(null)
-const renameInitial = ref('')
+// 输入框 dialog（新建分组 / 重命名分组 / 重命名条目）
+type PromptKind =
+  | { kind: 'add-group' }
+  | { kind: 'rename-group'; group: ResourceGroup }
+  | { kind: 'rename-item'; item: ResourceItem }
+const prompt = ref<{
+  open: boolean
+  title: string
+  label: string
+  placeholder: string
+  initial: string
+  confirmText: string
+  danger?: boolean
+  payload?: PromptKind
+}>({
+  open: false,
+  title: '',
+  label: '',
+  placeholder: '',
+  initial: '',
+  confirmText: '确定'
+})
+
+// 拖拽状态
+const dragId = ref<string | null>(null)
+const dropTarget = ref<{ groupId: string; itemId: string | null } | null>(null)
 
 onMounted(async () => {
   await launcher.load()
 })
 
 useDrop(({ paths }) => {
+  const target = launcher.sortedResourceGroups[0]
+  if (!target) return
   for (const p of paths) {
     const isUrl = /^https?:\/\//i.test(p)
-    const kind: ResourceItem['kind'] = isUrl
+    const kind: ResourceKind = isUrl
       ? 'url'
       : /\.[a-z0-9]{1,5}$/i.test(p)
         ? 'file'
         : 'folder'
     const name = isUrl ? p : p.split(/[\\\/]/).pop() || p
-    launcher.addResource(name, p, kind)
+    launcher.addResource(target.id, name, p, kind)
   }
   dropHint.value = true
   setTimeout(() => (dropHint.value = false), 1500)
 })
 
-function openAdd(kind: ResourceItem['kind']) {
+function openAddDialog(kind: ResourceKind, groupId?: string) {
   addKind.value = kind
+  addTargetGroupId.value = groupId ?? launcher.sortedResourceGroups[0]?.id ?? ''
   newName.value = ''
   newPath.value = ''
   showAddDialog.value = true
@@ -61,41 +88,29 @@ async function browse() {
   })
   if (typeof selected === 'string') {
     newPath.value = selected
-    if (!newName.value) {
-      newName.value = selected.split(/[\\\/]/).pop() || ''
-    }
+    if (!newName.value) newName.value = selected.split(/[\\\/]/).pop() || ''
   }
 }
 
 async function confirmAdd() {
-  if (!newPath.value.trim()) return
-  if (addKind.value === 'url' && !/^https?:\/\//i.test(newPath.value)) {
-    newPath.value = 'https://' + newPath.value
-  }
-  await launcher.addResource(newName.value, newPath.value, addKind.value)
+  if (!newPath.value.trim() || !addTargetGroupId.value) return
+  let p = newPath.value
+  if (addKind.value === 'url' && !/^https?:\/\//i.test(p)) p = 'https://' + p
+  await launcher.addResource(addTargetGroupId.value, newName.value, p, addKind.value)
   showAddDialog.value = false
 }
 
-const groupOrder = ['文件夹', '文件', '网址'] as const
-
-function iconFor(kind: ResourceItem['kind']) {
+function iconFor(kind: ResourceKind) {
   if (kind === 'folder') return 'i-carbon-folder'
   if (kind === 'file') return 'i-carbon-document'
   return 'i-carbon-link'
 }
 
-function colorFor(kind: ResourceItem['kind']) {
+function colorFor(kind: ResourceKind) {
   if (kind === 'folder') return 'var(--warning)'
   if (kind === 'file') return 'var(--accent)'
   return 'var(--success)'
 }
-
-const sortedGroups = computed(() => {
-  const groups = launcher.resourceGroups
-  return groupOrder
-    .filter((k) => groups[k]?.length)
-    .map((k) => ({ name: k, items: groups[k] }))
-})
 
 // ===== 右键菜单 =====
 function showItemMenu(e: MouseEvent, item: ResourceItem) {
@@ -115,17 +130,30 @@ function showItemMenu(e: MouseEvent, item: ResourceItem) {
       onClick: () => invoke('reveal_in_explorer', { path: item.path }).catch(() => {})
     })
   }
+  const moveSubmenu: MenuItem[] = launcher.sortedResourceGroups
+    .filter((g) => g.id !== item.groupId)
+    .map((g) => ({
+      label: g.name,
+      icon: 'i-carbon-folder',
+      onClick: () => launcher.moveResource(item.id, g.id)
+    }))
   items.push(
-    { divider: true, label: '' },
+    {
+      label: '移到分组',
+      icon: 'i-carbon-move',
+      disabled: moveSubmenu.length === 0,
+      submenu: moveSubmenu.length ? moveSubmenu : undefined
+    },
     {
       label: '重命名',
       icon: 'i-carbon-edit',
-      onClick: () => {
-        renaming.value = item
-        renameInitial.value = item.name
-        renameOpen.value = true
-      }
+      onClick: () =>
+        openPrompt(
+          { kind: 'rename-item', item } as PromptKind,
+          { title: '重命名', label: '新名称', initial: item.name }
+        )
     },
+    { divider: true, label: '' },
     {
       label: item.kind === 'url' ? '复制网址' : '复制路径',
       icon: 'i-carbon-copy',
@@ -144,98 +172,260 @@ function showItemMenu(e: MouseEvent, item: ResourceItem) {
   ctxOpen.value = true
 }
 
-function showBlankMenu(e: MouseEvent) {
+function showGroupMenu(e: MouseEvent, group: ResourceGroup) {
   e.preventDefault()
+  e.stopPropagation()
   ctxItems.value = [
-    { label: '添加文件夹', icon: 'i-carbon-folder-add', onClick: () => openAdd('folder') },
-    { label: '添加文件', icon: 'i-carbon-document-add', onClick: () => openAdd('file') },
-    { label: '添加网址', icon: 'i-carbon-link', onClick: () => openAdd('url') }
+    {
+      label: '添加文件夹',
+      icon: 'i-carbon-folder-add',
+      onClick: () => openAddDialog('folder', group.id)
+    },
+    {
+      label: '添加文件',
+      icon: 'i-carbon-document-add',
+      onClick: () => openAddDialog('file', group.id)
+    },
+    {
+      label: '添加网址',
+      icon: 'i-carbon-link',
+      onClick: () => openAddDialog('url', group.id)
+    },
+    { divider: true, label: '' },
+    {
+      label: '重命名',
+      icon: 'i-carbon-edit',
+      onClick: () =>
+        openPrompt(
+          { kind: 'rename-group', group } as PromptKind,
+          { title: '重命名分组', label: '分组名称', initial: group.name }
+        )
+    },
+    {
+      label: group.collapsed ? '展开' : '折叠',
+      icon: group.collapsed ? 'i-carbon-chevron-down' : 'i-carbon-chevron-up',
+      onClick: () => launcher.toggleResourceGroupCollapsed(group.id)
+    },
+    { divider: true, label: '' },
+    {
+      label: '删除分组',
+      icon: 'i-carbon-trash-can',
+      danger: true,
+      disabled: launcher.resourceGroups.length <= 1,
+      onClick: () => removeGroupWithConfirm(group)
+    }
   ]
   ctxPos.value = { x: e.clientX, y: e.clientY }
   ctxOpen.value = true
 }
 
-async function onRenameConfirm(value: string) {
-  if (renaming.value && value.trim()) {
-    const item = renaming.value
-    item.name = value.trim()
-    await launcher.persist()
+async function removeGroupWithConfirm(group: ResourceGroup) {
+  const items = launcher.resourcesByGroup[group.id] ?? []
+  if (items.length === 0) {
+    await launcher.removeResourceGroup(group.id)
+    return
   }
-  renameOpen.value = false
-  renaming.value = null
+  const fallback = launcher.sortedResourceGroups.find((g) => g.id !== group.id)
+  if (fallback) {
+    if (confirm(`分组 "${group.name}" 内有 ${items.length} 项，移动到 "${fallback.name}" 后删除？`)) {
+      await launcher.removeResourceGroup(group.id, fallback.id)
+    }
+  }
 }
+
+function openPrompt(payload: PromptKind, opts: Partial<typeof prompt.value>) {
+  prompt.value = {
+    open: true,
+    title: opts.title ?? '',
+    label: opts.label ?? '',
+    placeholder: opts.placeholder ?? '',
+    initial: opts.initial ?? '',
+    confirmText: opts.confirmText ?? '确定',
+    danger: opts.danger,
+    payload
+  }
+}
+
+async function onPromptConfirm(value: string) {
+  const p = prompt.value.payload
+  prompt.value.open = false
+  if (!p || !value.trim()) return
+  switch (p.kind) {
+    case 'add-group':
+      await launcher.addResourceGroup(value)
+      break
+    case 'rename-group':
+      await launcher.renameResourceGroup(p.group.id, value)
+      break
+    case 'rename-item':
+      await launcher.renameResource(p.item.id, value)
+      break
+  }
+}
+
+// ===== 拖拽 =====
+function onDragStart(e: DragEvent, item: ResourceItem) {
+  if (!e.dataTransfer) return
+  dragId.value = item.id
+  e.dataTransfer.effectAllowed = 'move'
+  e.dataTransfer.setData('text/plain', item.id)
+}
+function onDragEnd() {
+  dragId.value = null
+  dropTarget.value = null
+}
+function onCardDragOver(e: DragEvent, groupId: string, itemId: string) {
+  if (!dragId.value || dragId.value === itemId) return
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+  dropTarget.value = { groupId, itemId }
+}
+function onGroupDragOver(e: DragEvent, groupId: string) {
+  if (!dragId.value) return
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+  if (!dropTarget.value || dropTarget.value.groupId !== groupId) {
+    dropTarget.value = { groupId, itemId: null }
+  }
+}
+async function onDrop(e: DragEvent, groupId: string, itemId: string | null) {
+  e.preventDefault()
+  const src = dragId.value
+  if (!src) return
+  await launcher.dropResource(src, groupId, itemId)
+  dragId.value = null
+  dropTarget.value = null
+}
+
+const totalItems = computed(() => launcher.resources.length)
+const empty = computed(() => totalItems.value === 0)
 </script>
 
 <template>
   <div class="page">
-    <PageHeader
-      title="资源归纳"
-      subtitle="文件夹 / 文件 / 网址 一站式收纳 · 双击打开 · 直接拖入"
-    >
+    <PageHeader title="资源归纳" subtitle="分组管理 · 拖拽排序 · 右键操作 · 拖入文件即收纳">
       <template #actions>
         <div class="search">
           <span class="i-carbon-search" />
           <input v-model="launcher.keyword" placeholder="搜索 名称 / 路径…" />
         </div>
-        <button class="btn-ghost" @click="openAdd('folder')">
-          <span class="i-carbon-folder-add" /> 添加文件夹
+        <button
+          class="btn-ghost"
+          @click="
+            openPrompt({ kind: 'add-group' } as PromptKind, {
+              title: '新建分组',
+              label: '分组名称',
+              placeholder: '比如 项目 / 文档 / 常用网站',
+              confirmText: '新建'
+            })
+          "
+        >
+          <span class="i-carbon-folder-add" /> 新分组
         </button>
-        <button class="btn-ghost" @click="openAdd('file')">
-          <span class="i-carbon-document-add" /> 添加文件
+        <button class="btn-ghost" @click="openAddDialog('folder')">
+          <span class="i-carbon-folder-add" /> 文件夹
         </button>
-        <button class="btn-primary" @click="openAdd('url')">
-          <span class="i-carbon-link" /> 添加网址
+        <button class="btn-ghost" @click="openAddDialog('file')">
+          <span class="i-carbon-document-add" /> 文件
+        </button>
+        <button class="btn-primary" @click="openAddDialog('url')">
+          <span class="i-carbon-link" /> 网址
         </button>
       </template>
     </PageHeader>
 
-    <div
-      class="body scrollbar-thin"
-      :class="{ 'drop-active': dropHint }"
-      @contextmenu="showBlankMenu($event)"
-    >
-      <section v-for="g in sortedGroups" :key="g.name" class="section">
-        <h3>{{ g.name }} <em>{{ g.items.length }}</em></h3>
-        <div class="grid">
-          <div
-            v-for="item in g.items"
-            :key="item.id"
-            class="card-hover res-card"
-            @dblclick="launcher.openResource(item)"
-            @contextmenu="showItemMenu($event, item)"
-            :title="item.path"
-          >
-            <div class="icon" :style="{ background: 'var(--accent-soft)', color: colorFor(item.kind) }">
-              <span :class="iconFor(item.kind)" />
-            </div>
-            <div class="info">
-              <div class="name">{{ item.name }}</div>
-              <div class="path">{{ item.path }}</div>
-            </div>
-            <div class="actions">
-              <button
-                class="icon-btn"
-                title="打开"
-                @click.stop="launcher.openResource(item)"
-              >
-                <span class="i-carbon-launch" />
-              </button>
-              <button
-                class="icon-btn danger"
-                title="移除"
-                @click.stop="launcher.removeResource(item.id)"
-              >
-                <span class="i-carbon-trash-can" />
-              </button>
-            </div>
+    <div class="body scrollbar-thin" :class="{ 'drop-active': dropHint }">
+      <section
+        v-for="group in launcher.sortedResourceGroups"
+        :key="group.id"
+        class="group"
+        :class="{ collapsed: group.collapsed, 'is-drop': dropTarget?.groupId === group.id }"
+        @dragover="onGroupDragOver($event, group.id)"
+        @drop="onDrop($event, group.id, null)"
+      >
+        <header class="group-head" @contextmenu="showGroupMenu($event, group)">
+          <button class="caret" @click="launcher.toggleResourceGroupCollapsed(group.id)">
+            <span
+              :class="group.collapsed ? 'i-carbon-chevron-right' : 'i-carbon-chevron-down'"
+            />
+          </button>
+          <h3>{{ group.name }}</h3>
+          <em>{{ (launcher.resourcesByGroup[group.id] ?? []).length }}</em>
+          <div class="head-actions">
+            <button class="head-btn" title="添加文件夹" @click="openAddDialog('folder', group.id)">
+              <span class="i-carbon-folder-add" />
+            </button>
+            <button class="head-btn" title="添加文件" @click="openAddDialog('file', group.id)">
+              <span class="i-carbon-document-add" />
+            </button>
+            <button class="head-btn" title="添加网址" @click="openAddDialog('url', group.id)">
+              <span class="i-carbon-link" />
+            </button>
+            <button class="head-btn" title="更多" @click="showGroupMenu($event, group)">
+              <span class="i-carbon-overflow-menu-horizontal" />
+            </button>
           </div>
-        </div>
+        </header>
+
+        <transition name="slide">
+          <div v-if="!group.collapsed" class="grid">
+            <div
+              v-for="item in launcher.resourcesByGroup[group.id] ?? []"
+              :key="item.id"
+              class="res-card"
+              :class="{
+                dragging: dragId === item.id,
+                'drop-before':
+                  dropTarget?.groupId === group.id &&
+                  dropTarget?.itemId === item.id &&
+                  dragId !== item.id
+              }"
+              draggable="true"
+              :title="item.path"
+              @dblclick="launcher.openResource(item)"
+              @contextmenu="showItemMenu($event, item)"
+              @dragstart="onDragStart($event, item)"
+              @dragend="onDragEnd"
+              @dragover="onCardDragOver($event, group.id, item.id)"
+              @drop="onDrop($event, group.id, item.id)"
+            >
+              <div class="icon" :style="{ color: colorFor(item.kind) }">
+                <span :class="iconFor(item.kind)" />
+              </div>
+              <div class="info">
+                <div class="name">{{ item.name }}</div>
+                <div class="path">{{ item.path }}</div>
+              </div>
+            </div>
+            <button
+              v-if="(launcher.resourcesByGroup[group.id] ?? []).length === 0"
+              class="empty-slot"
+              @click="openAddDialog('folder', group.id)"
+            >
+              <span class="i-carbon-add" />
+              <span>添加到此分组</span>
+            </button>
+          </div>
+        </transition>
       </section>
 
-      <div v-if="sortedGroups.length === 0" class="empty">
-        <div class="empty-icon i-carbon-folder-shared" />
-        <p>暂无资源，点击右上角添加，或直接把文件 / 文件夹拖到这里。</p>
-        <p class="small">网址支持手动添加 https://…</p>
+      <div v-if="empty && launcher.resourceGroups.length === 1" class="empty-state">
+        <div class="empty-logo">
+          <span class="i-carbon-folder-shared" />
+        </div>
+        <h2>资源库还是空的</h2>
+        <p>点击右上角添加，或直接把 <strong>文件 / 文件夹</strong> 拖到这里</p>
+        <div class="empty-actions">
+          <button class="btn-ghost big" @click="openAddDialog('folder')">
+            <span class="i-carbon-folder-add" /> 文件夹
+          </button>
+          <button class="btn-ghost big" @click="openAddDialog('file')">
+            <span class="i-carbon-document-add" /> 文件
+          </button>
+          <button class="btn-primary big" @click="openAddDialog('url')">
+            <span class="i-carbon-link" /> 网址
+          </button>
+        </div>
       </div>
 
       <transition name="fade">
@@ -245,6 +435,7 @@ async function onRenameConfirm(value: string) {
       </transition>
     </div>
 
+    <!-- 添加资源对话框 -->
     <transition name="fade">
       <div v-if="showAddDialog" class="modal-mask" @click.self="showAddDialog = false">
         <div class="modal">
@@ -258,7 +449,15 @@ async function onRenameConfirm(value: string) {
               <span class="i-carbon-close" />
             </button>
           </header>
-          <div class="body">
+          <div class="modal-body">
+            <label class="field">
+              <span>添加到分组</span>
+              <select v-model="addTargetGroupId" class="input-base">
+                <option v-for="g in launcher.sortedResourceGroups" :key="g.id" :value="g.id">
+                  {{ g.name }}
+                </option>
+              </select>
+            </label>
             <label class="field">
               <span>名称（可选）</span>
               <input
@@ -303,13 +502,15 @@ async function onRenameConfirm(value: string) {
       @close="ctxOpen = false"
     />
     <PromptDialog
-      :open="renameOpen"
-      title="重命名"
-      label="新名称"
-      :initial="renameInitial"
-      confirm-text="保存"
-      @close="renameOpen = false"
-      @confirm="onRenameConfirm"
+      :open="prompt.open"
+      :title="prompt.title"
+      :label="prompt.label"
+      :placeholder="prompt.placeholder"
+      :initial="prompt.initial"
+      :confirm-text="prompt.confirmText"
+      :danger="prompt.danger"
+      @close="prompt.open = false"
+      @confirm="onPromptConfirm"
     />
   </div>
 </template>
@@ -327,7 +528,7 @@ async function onRenameConfirm(value: string) {
   gap: 8px;
   background: var(--bg-card);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: 10px;
   padding: 0 10px;
   height: 36px;
   color: var(--text-muted);
@@ -348,9 +549,10 @@ async function onRenameConfirm(value: string) {
   padding: 0 12px;
   background: var(--bg-card);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: 10px;
   color: var(--text-muted);
   font-size: 13px;
+  transition: all 0.15s;
 }
 .btn-ghost:hover {
   color: var(--text);
@@ -364,9 +566,10 @@ async function onRenameConfirm(value: string) {
   padding: 0 14px;
   background: var(--accent);
   color: #fff;
-  border-radius: var(--radius-md);
+  border-radius: 10px;
   font-weight: 500;
   font-size: 13px;
+  transition: opacity 0.15s;
 }
 .btn-primary:hover {
   opacity: 0.9;
@@ -375,73 +578,149 @@ async function onRenameConfirm(value: string) {
   opacity: 0.4;
   cursor: not-allowed;
 }
+.btn-primary.big,
+.btn-ghost.big {
+  height: 40px;
+  padding: 0 18px;
+  font-size: 14px;
+}
 
 .body {
   flex: 1;
   overflow-y: auto;
-  padding: 12px 24px 24px;
+  padding: 12px 20px 24px;
+  position: relative;
 }
 .body.drop-active {
   outline: 2px dashed var(--accent);
   outline-offset: -8px;
 }
 
-.section + .section {
-  margin-top: 22px;
+.group {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  margin-bottom: 12px;
+  padding: 4px 14px 12px;
+  transition: border-color 0.15s, background 0.15s;
 }
-.section h3 {
+.group.is-drop {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.group.collapsed {
+  padding-bottom: 4px;
+}
+
+.group-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
-  color: var(--text-muted);
-  font-weight: 500;
-  margin: 4px 0 12px;
+  padding: 6px 0 8px;
+  color: var(--text);
+  cursor: pointer;
 }
-.section h3 em {
+.caret {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  border-radius: 5px;
+}
+.caret:hover {
+  background: var(--bg-elev);
+  color: var(--text);
+}
+.group-head h3 {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+.group-head em {
   font-style: normal;
   font-size: 11px;
+  color: var(--text-muted);
   background: var(--bg-elev);
-  padding: 2px 7px;
+  padding: 1px 7px;
   border-radius: 99px;
+}
+.head-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.group:hover .head-actions {
+  opacity: 1;
+}
+.head-btn {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--text-muted);
+}
+.head-btn:hover {
+  background: var(--bg-elev);
+  color: var(--text);
 }
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px;
+  padding: 4px 0;
 }
 
 .res-card {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 12px;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg-elev);
+  border: 1.5px solid transparent;
+  border-radius: 10px;
   cursor: pointer;
-  transition: all 0.18s;
+  user-select: none;
+  position: relative;
+  transition: all 0.15s;
 }
 .res-card:hover {
   border-color: var(--accent);
   transform: translateY(-1px);
-  box-shadow: var(--shadow-card);
 }
-.icon {
-  width: 38px;
-  height: 38px;
-  border-radius: var(--radius-md);
+.res-card.dragging {
+  opacity: 0.4;
+}
+.res-card.drop-before::before {
+  content: '';
+  position: absolute;
+  left: -4px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.res-card .icon {
+  width: 36px;
+  height: 36px;
   display: grid;
   place-items: center;
-  font-size: 20px;
+  font-size: 22px;
   flex-shrink: 0;
+  background: var(--bg-card);
+  border-radius: 8px;
 }
-.info {
-  min-width: 0;
+.res-card .info {
   flex: 1;
+  min-width: 0;
 }
-.name {
+.res-card .name {
   font-size: 13px;
   font-weight: 500;
   color: var(--text);
@@ -449,54 +728,78 @@ async function onRenameConfirm(value: string) {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.path {
+.res-card .path {
   font-size: 11px;
   color: var(--text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   font-family: var(--font-mono);
-}
-.actions {
-  display: none;
-  gap: 4px;
-}
-.res-card:hover .actions {
-  display: flex;
-}
-.icon-btn {
-  width: 28px;
-  height: 28px;
-  display: grid;
-  place-items: center;
-  border-radius: 6px;
-  color: var(--text-muted);
-  background: var(--bg-elev);
-  transition: all 0.15s;
-}
-.icon-btn:hover {
-  background: var(--accent);
-  color: #fff;
-}
-.icon-btn.danger:hover {
-  background: var(--danger);
+  margin-top: 2px;
 }
 
-.empty {
+.empty-slot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 60px;
+  padding: 12px;
+  background: transparent;
+  border: 1.5px dashed var(--border);
+  border-radius: 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+  transition: all 0.15s;
+}
+.empty-slot:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.empty-slot > span:first-child {
+  font-size: 18px;
+}
+
+.empty-state {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
-  padding: 60px 20px;
+  justify-content: center;
+  gap: 6px;
+  padding: 70px 20px;
+  text-align: center;
+}
+.empty-logo {
+  width: 80px;
+  height: 80px;
+  border-radius: 22px;
+  background: var(--accent-soft);
+  display: grid;
+  place-items: center;
+  font-size: 36px;
+  color: var(--accent);
+  margin-bottom: 8px;
+}
+.empty-state h2 {
+  margin: 6px 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+}
+.empty-state p {
+  margin: 0;
+  font-size: 13px;
   color: var(--text-muted);
+  max-width: 480px;
 }
-.empty-icon {
-  font-size: 48px;
-  opacity: 0.4;
+.empty-state strong {
+  color: var(--accent);
 }
-.empty .small {
-  font-size: 11.5px;
-  opacity: 0.7;
+.empty-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
 }
 
 .drop-banner {
@@ -507,16 +810,17 @@ async function onRenameConfirm(value: string) {
   background: var(--accent);
   color: #fff;
   padding: 10px 18px;
-  border-radius: var(--radius-md);
+  border-radius: 10px;
   font-size: 13px;
   font-weight: 500;
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  box-shadow: var(--shadow-elev);
-  z-index: 100;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  z-index: 150;
 }
 
+/* 添加资源对话框 */
 .modal-mask {
   position: fixed;
   inset: 0;
@@ -530,9 +834,9 @@ async function onRenameConfirm(value: string) {
   width: 460px;
   background: var(--bg-card);
   border: 1px solid var(--border);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-elev);
+  border-radius: 14px;
   overflow: hidden;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
 }
 .modal header {
   display: flex;
@@ -546,12 +850,23 @@ async function onRenameConfirm(value: string) {
   font-weight: 600;
   margin: 0;
 }
-.modal .body {
+.icon-btn {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--text-muted);
+}
+.icon-btn:hover {
+  background: var(--bg-elev);
+  color: var(--text);
+}
+.modal-body {
   padding: 18px;
   display: flex;
   flex-direction: column;
   gap: 14px;
-  overflow: visible;
 }
 .field {
   display: flex;
@@ -573,5 +888,20 @@ async function onRenameConfirm(value: string) {
   gap: 8px;
   padding: 14px 18px;
   border-top: 1px solid var(--border);
+}
+
+.slide-enter-active, .slide-leave-active {
+  transition: opacity 0.18s ease, max-height 0.22s ease, padding 0.18s ease;
+  overflow: hidden;
+}
+.slide-enter-from, .slide-leave-to {
+  opacity: 0;
+  max-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.slide-enter-to, .slide-leave-from {
+  opacity: 1;
+  max-height: 1500px;
 }
 </style>

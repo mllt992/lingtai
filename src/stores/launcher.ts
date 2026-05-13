@@ -3,57 +3,131 @@ import { invoke } from '@tauri-apps/api/core'
 import type {
   LauncherGroup,
   LauncherItem,
+  ResourceGroup,
   ResourceItem,
+  ResourceKind,
   ShortcutEntry
 } from '@/types'
 
-interface PersistedShapeV2 {
-  version: 2
+interface PersistedShapeV3 {
+  version: 3
   groups: LauncherGroup[]
   items: LauncherItem[]
+  resourceGroups: ResourceGroup[]
   resources: ResourceItem[]
 }
 
-// 旧版（v1）形状：直接是 {launcherItems, resources}，没有 groups/order/groupId
-interface PersistedShapeV1 {
-  launcherItems?: Array<Partial<LauncherItem> & { name: string; path: string }>
-  resources?: ResourceItem[]
-}
-
-const DEFAULT_GROUP_ID = 'default'
+const DEFAULT_LAUNCHER_GID = 'default'
+const DEFAULT_RES_GID = 'res-default'
 
 function uid() {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36)
 }
 
-function migrate(raw: any): PersistedShapeV2 {
-  if (raw && raw.version === 2 && Array.isArray(raw.groups)) {
-    return raw as PersistedShapeV2
+/**
+ * 把任意旧版本的 items.json 升级到 v3。
+ * - v1: { launcherItems, resources }  —— resources 无 group
+ * - v2: { version:2, groups, items, resources }  —— 启动器有 group，资源无
+ * - v3: { version:3, ..., resourceGroups, resources(with groupId) }
+ */
+function migrate(raw: any): PersistedShapeV3 {
+  if (raw && raw.version === 3 && Array.isArray(raw.resourceGroups)) {
+    return raw as PersistedShapeV3
   }
-  const old = (raw ?? {}) as PersistedShapeV1
-  const items: LauncherItem[] = (old.launcherItems ?? []).map((it, i) => ({
-    id: it.id ?? uid(),
-    groupId: DEFAULT_GROUP_ID,
-    name: it.name,
-    path: it.path,
-    target: (it as any).target ?? null,
-    iconPath: (it as any).iconPath ?? null,
-    iconData: (it as any).iconData ?? null,
-    order: i,
-    addedAt: it.addedAt ?? Date.now()
-  }))
-  return {
-    version: 2,
-    groups: [
+
+  // ---------- launcher 部分 ----------
+  let groups: LauncherGroup[] = []
+  let items: LauncherItem[] = []
+  if (raw?.version === 2 && Array.isArray(raw.groups)) {
+    groups = raw.groups
+    items = raw.items ?? []
+  } else if (Array.isArray(raw?.launcherItems)) {
+    // v1
+    groups = [
       {
-        id: DEFAULT_GROUP_ID,
-        name: items.length ? '我的应用' : '快速启动',
+        id: DEFAULT_LAUNCHER_GID,
+        name: raw.launcherItems.length ? '我的应用' : '快速启动',
         order: 0
       }
-    ],
-    items,
-    resources: old.resources ?? []
+    ]
+    items = raw.launcherItems.map((it: any, i: number) => ({
+      id: it.id ?? uid(),
+      groupId: DEFAULT_LAUNCHER_GID,
+      name: it.name,
+      path: it.path,
+      target: it.target ?? null,
+      iconPath: it.iconPath ?? null,
+      iconData: it.iconData ?? null,
+      order: i,
+      addedAt: it.addedAt ?? Date.now()
+    }))
+  } else {
+    groups = [{ id: DEFAULT_LAUNCHER_GID, name: '快速启动', order: 0 }]
   }
+
+  // ---------- resources 部分 ----------
+  const rawResources: any[] = raw?.resources ?? []
+  let resourceGroups: ResourceGroup[] = []
+  let resources: ResourceItem[] = []
+
+  if (rawResources.length === 0) {
+    resourceGroups = [{ id: DEFAULT_RES_GID, name: '我的收藏', order: 0 }]
+  } else if (rawResources[0]?.groupId) {
+    // 已是新形态（少数边界情况）—— 直接用，缺 groupId 的丢到默认组
+    const existingGids = new Set(rawResources.map((r) => r.groupId).filter(Boolean))
+    if (existingGids.size === 0) existingGids.add(DEFAULT_RES_GID)
+    resourceGroups = raw?.resourceGroups ?? [...existingGids].map((g, i) => ({
+      id: g as string,
+      name: '收藏',
+      order: i
+    }))
+    resources = rawResources.map((r: any, i: number) => ({
+      id: r.id ?? uid(),
+      groupId: r.groupId ?? DEFAULT_RES_GID,
+      name: r.name,
+      kind: r.kind,
+      path: r.path,
+      order: r.order ?? i,
+      addedAt: r.addedAt ?? Date.now()
+    }))
+  } else {
+    // v1/v2 资源：按 kind 自动建组，迁移到新结构
+    const byKind: Record<string, any[]> = {}
+    for (const r of rawResources) {
+      const k = r.kind ?? 'file'
+      if (!byKind[k]) byKind[k] = []
+      byKind[k].push(r)
+    }
+    const kindMeta: Array<[ResourceKind, string]> = [
+      ['folder', '文件夹'],
+      ['file', '文件'],
+      ['url', '网址']
+    ]
+    let gidx = 0
+    for (const [k, name] of kindMeta) {
+      const arr = byKind[k]
+      if (!arr?.length) continue
+      const gid = `res-${k}-` + uid().slice(0, 6)
+      resourceGroups.push({ id: gid, name, order: gidx++ })
+      arr.forEach((r, i) => {
+        resources.push({
+          id: r.id ?? uid(),
+          groupId: gid,
+          name: r.name,
+          kind: r.kind,
+          path: r.path,
+          order: i,
+          addedAt: r.addedAt ?? Date.now()
+        })
+      })
+    }
+    // 兜底：若所有 kind 都为空（不应发生）
+    if (resourceGroups.length === 0) {
+      resourceGroups = [{ id: DEFAULT_RES_GID, name: '我的收藏', order: 0 }]
+    }
+  }
+
+  return { version: 3, groups, items, resourceGroups, resources }
 }
 
 export const useLauncherStore = defineStore('launcher', {
@@ -61,6 +135,7 @@ export const useLauncherStore = defineStore('launcher', {
     autoApps: [] as ShortcutEntry[],
     groups: [] as LauncherGroup[],
     items: [] as LauncherItem[],
+    resourceGroups: [] as ResourceGroup[],
     resources: [] as ResourceItem[],
     scanning: false,
     scanError: null as string | null,
@@ -86,30 +161,30 @@ export const useLauncherStore = defineStore('launcher', {
       }
       return map
     },
+    sortedResourceGroups(state): ResourceGroup[] {
+      return [...state.resourceGroups].sort((a, b) => a.order - b.order)
+    },
+    resourcesByGroup(state): Record<string, ResourceItem[]> {
+      const k = state.keyword.trim().toLowerCase()
+      const map: Record<string, ResourceItem[]> = {}
+      for (const g of state.resourceGroups) map[g.id] = []
+      for (const r of state.resources) {
+        if (k && !r.name.toLowerCase().includes(k) && !r.path.toLowerCase().includes(k)) {
+          continue
+        }
+        if (!map[r.groupId]) map[r.groupId] = []
+        map[r.groupId].push(r)
+      }
+      for (const gid of Object.keys(map)) {
+        map[gid].sort((a, b) => a.order - b.order)
+      }
+      return map
+    },
     filteredApps(state): ShortcutEntry[] {
       const k = state.keyword.trim().toLowerCase()
       if (!k) return state.autoApps
       return state.autoApps.filter((a) => a.name.toLowerCase().includes(k))
     },
-    filteredResources(state): ResourceItem[] {
-      const k = state.keyword.trim().toLowerCase()
-      if (!k) return state.resources
-      return state.resources.filter(
-        (r) =>
-          r.name.toLowerCase().includes(k) ||
-          r.path.toLowerCase().includes(k)
-      )
-    },
-    resourceGroups(): Record<string, ResourceItem[]> {
-      const groups: Record<string, ResourceItem[]> = {}
-      for (const r of this.filteredResources) {
-        const key = r.kind === 'folder' ? '文件夹' : r.kind === 'file' ? '文件' : '网址'
-        if (!groups[key]) groups[key] = []
-        groups[key].push(r)
-      }
-      return groups
-    },
-    /** 已添加路径集合，供"添加已装"对话框去重 */
     existingPaths(state): Set<string> {
       const s = new Set<string>()
       for (const it of state.items) s.add(it.path.toLowerCase())
@@ -119,18 +194,19 @@ export const useLauncherStore = defineStore('launcher', {
   actions: {
     async load() {
       const data = await invoke<any>('load_items')
-      const migrated = migrate(data)
-      this.groups = migrated.groups
-      this.items = migrated.items
-      this.resources = migrated.resources ?? []
-      // 若迁移产生了空的默认分组，立即写回
-      if (!data || data.version !== 2) await this.persist()
+      const m = migrate(data)
+      this.groups = m.groups
+      this.items = m.items
+      this.resourceGroups = m.resourceGroups
+      this.resources = m.resources
+      if (!data || data.version !== 3) await this.persist()
     },
     async persist() {
-      const payload: PersistedShapeV2 = {
-        version: 2,
+      const payload: PersistedShapeV3 = {
+        version: 3,
         groups: this.groups,
         items: this.items,
+        resourceGroups: this.resourceGroups,
         resources: this.resources
       }
       await invoke('save_items', { items: payload })
@@ -146,7 +222,8 @@ export const useLauncherStore = defineStore('launcher', {
         this.scanning = false
       }
     },
-    // ============ 分组操作 ============
+
+    // ============ Launcher 分组 ============
     async addGroup(name: string): Promise<LauncherGroup> {
       const trimmed = name.trim() || '新分组'
       const order = this.groups.length
@@ -170,17 +247,15 @@ export const useLauncherStore = defineStore('launcher', {
       await this.persist()
     },
     async removeGroup(id: string, moveItemsTo?: string) {
-      if (this.groups.length <= 1) {
-        throw new Error('至少保留一个分组')
-      }
+      if (this.groups.length <= 1) throw new Error('至少保留一个分组')
       const affected = this.items.filter((i) => i.groupId === id)
       if (moveItemsTo) {
-        const targetMaxOrder = this.items
+        const tail = this.items
           .filter((i) => i.groupId === moveItemsTo)
           .reduce((m, i) => Math.max(m, i.order), -1)
         affected.forEach((it, i) => {
           it.groupId = moveItemsTo
-          it.order = targetMaxOrder + 1 + i
+          it.order = tail + 1 + i
         })
       } else {
         this.items = this.items.filter((i) => i.groupId !== id)
@@ -189,19 +264,13 @@ export const useLauncherStore = defineStore('launcher', {
       this.groups.forEach((g, i) => (g.order = i))
       await this.persist()
     },
-    async reorderGroups(orderedIds: string[]) {
-      orderedIds.forEach((id, i) => {
-        const g = this.groups.find((x) => x.id === id)
-        if (g) g.order = i
-      })
-      await this.persist()
-    },
-    // ============ 条目操作 ============
+
+    // ============ Launcher 条目 ============
     async addItem(
       groupId: string,
       input: { name: string; path: string; target?: string | null }
     ): Promise<LauncherItem> {
-      const order = this._nextOrder(groupId)
+      const order = this._nextLauncherOrder(groupId)
       const item: LauncherItem = {
         id: uid(),
         groupId,
@@ -215,12 +284,11 @@ export const useLauncherStore = defineStore('launcher', {
       }
       this.items.push(item)
       await this.persist()
-      // 异步抽取图标，不阻塞插入
       this.refreshIcon(item.id).catch(() => {})
       return item
     },
     async addItemsFromShortcuts(groupId: string, entries: ShortcutEntry[]) {
-      let order = this._nextOrder(groupId)
+      let order = this._nextLauncherOrder(groupId)
       const created: LauncherItem[] = []
       for (const e of entries) {
         const item: LauncherItem = {
@@ -238,7 +306,6 @@ export const useLauncherStore = defineStore('launcher', {
         created.push(item)
       }
       await this.persist()
-      // 并发抽取图标（限 4 并发）
       void this._extractBatch(created.map((c) => c.id))
       return created
     },
@@ -256,21 +323,12 @@ export const useLauncherStore = defineStore('launcher', {
       const it = this.items.find((x) => x.id === id)
       if (!it || it.groupId === targetGroupId) return
       it.groupId = targetGroupId
-      it.order = this._nextOrder(targetGroupId)
+      it.order = this._nextLauncherOrder(targetGroupId)
       await this.persist()
     },
-    async reorderItems(groupId: string, orderedIds: string[]) {
-      orderedIds.forEach((id, i) => {
-        const it = this.items.find((x) => x.id === id)
-        if (it && it.groupId === groupId) it.order = i
-      })
-      await this.persist()
-    },
-    /** 把 sourceId 插入到目标 group 的某条目之前；targetId 为空则追加末尾 */
     async dropItem(sourceId: string, targetGroupId: string, targetId: string | null) {
       const src = this.items.find((x) => x.id === sourceId)
       if (!src) return
-      // 把目标 group 现有条目按 order 排序，决定插入位置
       const list = this.items
         .filter((x) => x.groupId === targetGroupId && x.id !== sourceId)
         .sort((a, b) => a.order - b.order)
@@ -294,7 +352,7 @@ export const useLauncherStore = defineStore('launcher', {
           await this.persist()
         }
       } catch {
-        // 静默：保留旧图标 / 占位
+        // silent
       }
     },
     async _extractBatch(ids: string[]) {
@@ -307,27 +365,113 @@ export const useLauncherStore = defineStore('launcher', {
       })
       await Promise.all(workers)
     },
-    _nextOrder(groupId: string): number {
+    _nextLauncherOrder(groupId: string): number {
       return this.items
         .filter((i) => i.groupId === groupId)
         .reduce((m, i) => Math.max(m, i.order + 1), 0)
     },
-    // ============ 资源（保持不变） ============
-    async addResource(name: string, path: string, kind: ResourceItem['kind']) {
-      const item: ResourceItem = {
+
+    // ============ 资源 分组 ============
+    async addResourceGroup(name: string): Promise<ResourceGroup> {
+      const trimmed = name.trim() || '新分组'
+      const order = this.resourceGroups.length
+        ? Math.max(...this.resourceGroups.map((g) => g.order)) + 1
+        : 0
+      const g: ResourceGroup = { id: uid(), name: trimmed, order }
+      this.resourceGroups.push(g)
+      await this.persist()
+      return g
+    },
+    async renameResourceGroup(id: string, name: string) {
+      const g = this.resourceGroups.find((x) => x.id === id)
+      if (!g) return
+      g.name = name.trim() || g.name
+      await this.persist()
+    },
+    async toggleResourceGroupCollapsed(id: string) {
+      const g = this.resourceGroups.find((x) => x.id === id)
+      if (!g) return
+      g.collapsed = !g.collapsed
+      await this.persist()
+    },
+    async removeResourceGroup(id: string, moveItemsTo?: string) {
+      if (this.resourceGroups.length <= 1) throw new Error('至少保留一个分组')
+      const affected = this.resources.filter((r) => r.groupId === id)
+      if (moveItemsTo) {
+        const tail = this.resources
+          .filter((r) => r.groupId === moveItemsTo)
+          .reduce((m, r) => Math.max(m, r.order), -1)
+        affected.forEach((r, i) => {
+          r.groupId = moveItemsTo
+          r.order = tail + 1 + i
+        })
+      } else {
+        this.resources = this.resources.filter((r) => r.groupId !== id)
+      }
+      this.resourceGroups = this.resourceGroups.filter((g) => g.id !== id)
+      this.resourceGroups.forEach((g, i) => (g.order = i))
+      await this.persist()
+    },
+
+    // ============ 资源 条目 ============
+    async addResource(
+      groupId: string,
+      name: string,
+      path: string,
+      kind: ResourceKind
+    ): Promise<ResourceItem> {
+      const r: ResourceItem = {
         id: uid(),
+        groupId,
         name: name.trim() || path,
         kind,
         path,
+        order: this._nextResourceOrder(groupId),
         addedAt: Date.now()
       }
-      this.resources.unshift(item)
+      this.resources.push(r)
       await this.persist()
+      return r
     },
     async removeResource(id: string) {
       this.resources = this.resources.filter((r) => r.id !== id)
       await this.persist()
     },
+    async renameResource(id: string, name: string) {
+      const r = this.resources.find((x) => x.id === id)
+      if (!r) return
+      r.name = name.trim() || r.name
+      await this.persist()
+    },
+    async moveResource(id: string, targetGroupId: string) {
+      const r = this.resources.find((x) => x.id === id)
+      if (!r || r.groupId === targetGroupId) return
+      r.groupId = targetGroupId
+      r.order = this._nextResourceOrder(targetGroupId)
+      await this.persist()
+    },
+    async dropResource(sourceId: string, targetGroupId: string, targetId: string | null) {
+      const src = this.resources.find((x) => x.id === sourceId)
+      if (!src) return
+      const list = this.resources
+        .filter((x) => x.groupId === targetGroupId && x.id !== sourceId)
+        .sort((a, b) => a.order - b.order)
+      let insertAt = list.length
+      if (targetId) {
+        const idx = list.findIndex((x) => x.id === targetId)
+        if (idx >= 0) insertAt = idx
+      }
+      src.groupId = targetGroupId
+      list.splice(insertAt, 0, src)
+      list.forEach((x, i) => (x.order = i))
+      await this.persist()
+    },
+    _nextResourceOrder(groupId: string): number {
+      return this.resources
+        .filter((r) => r.groupId === groupId)
+        .reduce((m, r) => Math.max(m, r.order + 1), 0)
+    },
+
     // ============ 启动 / 打开 ============
     async launchItem(item: LauncherItem | ShortcutEntry) {
       await invoke('launch_path', { path: item.path })

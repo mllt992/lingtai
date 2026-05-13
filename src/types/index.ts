@@ -27,13 +27,20 @@ export interface LauncherItem {
   addedAt: number
 }
 
+export interface ResourceGroup {
+  id: string
+  name: string
+  order: number
+  collapsed?: boolean
+}
+
 export interface ResourceItem {
   id: string
+  groupId: string
   name: string
   kind: ResourceKind
   path: string
-  group?: string
-  pinned?: boolean
+  order: number
   addedAt: number
 }
 

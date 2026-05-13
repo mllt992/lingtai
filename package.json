@@ -11,6 +11,9 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
+    "exe": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-exe.ps1",
+    "exe:installer": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-exe.ps1 -Installer",
+    "exe:open": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-exe.ps1 -Open",
     "icons": "node scripts/gen-icons.mjs",
     "postinstall": "node scripts/gen-icons.mjs"
   },
