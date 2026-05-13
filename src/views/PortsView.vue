@@ -4,11 +4,89 @@ import { usePortsStore } from '@/stores/ports'
 import { useSettingsStore } from '@/stores/settings'
 import { invoke } from '@tauri-apps/api/core'
 import PageHeader from '@/components/PageHeader.vue'
+import ContextMenu, { type MenuItem } from '@/components/ContextMenu.vue'
 import type { PortEntry } from '@/types'
 
 const ports = usePortsStore()
 const settings = useSettingsStore()
 const confirmKill = ref<PortEntry | null>(null)
+
+// 右键菜单
+const ctxOpen = ref(false)
+const ctxPos = ref({ x: 0, y: 0 })
+const ctxItems = ref<MenuItem[]>([])
+
+function showPortMenu(e: MouseEvent, entry: PortEntry) {
+  e.preventDefault()
+  const items: MenuItem[] = []
+  if (entry.process_path) {
+    items.push({
+      label: '打开所在目录',
+      icon: 'i-carbon-folder-open',
+      onClick: () => openProcessFolder(entry)
+    })
+  }
+  items.push({
+    label: '复制端口号',
+    icon: 'i-carbon-copy',
+    onClick: () => navigator.clipboard.writeText(String(entry.local_port))
+  })
+  if (entry.pid != null) {
+    items.push({
+      label: `复制 PID (${entry.pid})`,
+      icon: 'i-carbon-copy',
+      onClick: () => navigator.clipboard.writeText(String(entry.pid))
+    })
+  }
+  if (entry.process_path) {
+    items.push({
+      label: '复制完整路径',
+      icon: 'i-carbon-copy',
+      onClick: () => navigator.clipboard.writeText(entry.process_path!)
+    })
+  }
+  items.push({
+    label: '复制为：端口 进程 PID',
+    icon: 'i-carbon-copy',
+    onClick: () =>
+      navigator.clipboard.writeText(
+        `${entry.protocol} ${entry.local_port}\t${entry.process_name ?? '-'}\tPID ${entry.pid ?? '-'}`
+      )
+  })
+  if (entry.pid != null && !entry.is_system) {
+    items.push(
+      { divider: true, label: '' },
+      {
+        label: '结束进程',
+        icon: 'i-carbon-stop',
+        danger: true,
+        onClick: () => (confirmKill.value = entry)
+      }
+    )
+  }
+  ctxItems.value = items
+  ctxPos.value = { x: e.clientX, y: e.clientY }
+  ctxOpen.value = true
+}
+
+function showBlankMenu(e: MouseEvent) {
+  e.preventDefault()
+  ctxItems.value = [
+    {
+      label: ports.loading ? '正在刷新…' : '立即刷新',
+      icon: 'i-carbon-renew',
+      disabled: ports.loading,
+      onClick: () => ports.refresh()
+    },
+    {
+      label: ports.includeSystem ? '隐藏系统进程' : '显示系统进程',
+      icon: ports.includeSystem ? 'i-carbon-view-off' : 'i-carbon-view',
+      onClick: () => ports.setIncludeSystem(!ports.includeSystem)
+    }
+  ]
+  ctxPos.value = { x: e.clientX, y: e.clientY }
+  ctxOpen.value = true
+}
 
 onMounted(() => {
   ports.includeSystem = settings.ports.includeSystem
@@ -58,7 +136,7 @@ async function doKill() {
       </template>
     </PageHeader>
 
-    <div class="body scrollbar-thin">
+    <div class="body scrollbar-thin" @contextmenu="showBlankMenu($event)">
       <div v-if="ports.error" class="error">
         <span class="i-carbon-warning" /> {{ ports.error }}
       </div>
@@ -79,6 +157,7 @@ async function doKill() {
             :key="`${e.protocol}-${e.local_port}-${idx}`"
             class="tr"
             :class="{ sys: e.is_system }"
+            @contextmenu="showPortMenu($event, e)"
           >
             <div class="td proto">
               <span class="badge" :style="{ background: protoColor(e.protocol) }">
@@ -119,6 +198,14 @@ async function doKill() {
         </div>
       </div>
     </div>
+
+    <ContextMenu
+      :open="ctxOpen"
+      :x="ctxPos.x"
+      :y="ctxPos.y"
+      :items="ctxItems"
+      @close="ctxOpen = false"
+    />
 
     <transition name="fade">
       <div v-if="confirmKill" class="modal-mask" @click.self="confirmKill = null">

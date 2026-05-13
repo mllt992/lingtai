@@ -9,7 +9,7 @@ export interface MenuItem {
   divider?: boolean
   /** 子菜单（可选，简单嵌套） */
   submenu?: MenuItem[]
-  onClick?: () => void | Promise<void>
+  onClick?: () => unknown | Promise<unknown>
 }
 
 const props = defineProps<{

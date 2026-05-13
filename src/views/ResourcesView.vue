@@ -3,7 +3,10 @@ import { computed, onMounted, ref } from 'vue'
 import { useLauncherStore } from '@/stores/launcher'
 import { useDrop } from '@/composables/useDrop'
 import PageHeader from '@/components/PageHeader.vue'
+import ContextMenu, { type MenuItem } from '@/components/ContextMenu.vue'
+import PromptDialog from '@/components/PromptDialog.vue'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
+import { invoke } from '@tauri-apps/api/core'
 import type { ResourceItem } from '@/types'
 
 const launcher = useLauncherStore()
@@ -13,6 +16,16 @@ const addKind = ref<ResourceItem['kind']>('folder')
 const newName = ref('')
 const newPath = ref('')
 const dropHint = ref(false)
+
+// 右键菜单
+const ctxOpen = ref(false)
+const ctxPos = ref({ x: 0, y: 0 })
+const ctxItems = ref<MenuItem[]>([])
+
+// 重命名 prompt
+const renameOpen = ref(false)
+const renaming = ref<ResourceItem | null>(null)
+const renameInitial = ref('')
 
 onMounted(async () => {
   await launcher.load()
@@ -83,6 +96,74 @@ const sortedGroups = computed(() => {
     .filter((k) => groups[k]?.length)
     .map((k) => ({ name: k, items: groups[k] }))
 })
+
+// ===== 右键菜单 =====
+function showItemMenu(e: MouseEvent, item: ResourceItem) {
+  e.preventDefault()
+  e.stopPropagation()
+  const items: MenuItem[] = [
+    {
+      label: item.kind === 'url' ? '打开网址' : '打开',
+      icon: 'i-carbon-launch',
+      onClick: () => launcher.openResource(item)
+    }
+  ]
+  if (item.kind !== 'url') {
+    items.push({
+      label: '在资源管理器中显示',
+      icon: 'i-carbon-folder-open',
+      onClick: () => invoke('reveal_in_explorer', { path: item.path }).catch(() => {})
+    })
+  }
+  items.push(
+    { divider: true, label: '' },
+    {
+      label: '重命名',
+      icon: 'i-carbon-edit',
+      onClick: () => {
+        renaming.value = item
+        renameInitial.value = item.name
+        renameOpen.value = true
+      }
+    },
+    {
+      label: item.kind === 'url' ? '复制网址' : '复制路径',
+      icon: 'i-carbon-copy',
+      onClick: () => navigator.clipboard.writeText(item.path)
+    },
+    { divider: true, label: '' },
+    {
+      label: '移除',
+      icon: 'i-carbon-trash-can',
+      danger: true,
+      onClick: () => launcher.removeResource(item.id)
+    }
+  )
+  ctxItems.value = items
+  ctxPos.value = { x: e.clientX, y: e.clientY }
+  ctxOpen.value = true
+}
+
+function showBlankMenu(e: MouseEvent) {
+  e.preventDefault()
+  ctxItems.value = [
+    { label: '添加文件夹', icon: 'i-carbon-folder-add', onClick: () => openAdd('folder') },
+    { label: '添加文件', icon: 'i-carbon-document-add', onClick: () => openAdd('file') },
+    { label: '添加网址', icon: 'i-carbon-link', onClick: () => openAdd('url') }
+  ]
+  ctxPos.value = { x: e.clientX, y: e.clientY }
+  ctxOpen.value = true
+}
+
+async function onRenameConfirm(value: string) {
+  if (renaming.value && value.trim()) {
+    const item = renaming.value
+    item.name = value.trim()
+    await launcher.persist()
+  }
+  renameOpen.value = false
+  renaming.value = null
+}
 </script>
 
 <template>
@@ -108,7 +189,11 @@ const sortedGroups = computed(() => {
       </template>
     </PageHeader>
 
-    <div class="body scrollbar-thin" :class="{ 'drop-active': dropHint }">
+    <div
+      class="body scrollbar-thin"
+      :class="{ 'drop-active': dropHint }"
+      @contextmenu="showBlankMenu($event)"
+    >
       <section v-for="g in sortedGroups" :key="g.name" class="section">
         <h3>{{ g.name }} <em>{{ g.items.length }}</em></h3>
         <div class="grid">
@@ -117,6 +202,7 @@ const sortedGroups = computed(() => {
             :key="item.id"
             class="card-hover res-card"
             @dblclick="launcher.openResource(item)"
+            @contextmenu="showItemMenu($event, item)"
             :title="item.path"
           >
             <div class="icon" :style="{ background: 'var(--accent-soft)', color: colorFor(item.kind) }">
@@ -208,6 +294,23 @@ const sortedGroups = computed(() => {
         </div>
       </div>
     </transition>
+
+    <ContextMenu
+      :open="ctxOpen"
+      :x="ctxPos.x"
+      :y="ctxPos.y"
+      :items="ctxItems"
+      @close="ctxOpen = false"
+    />
+    <PromptDialog
+      :open="renameOpen"
+      title="重命名"
+      label="新名称"
+      :initial="renameInitial"
+      confirm-text="保存"
+      @close="renameOpen = false"
+      @confirm="onRenameConfirm"
+    />
   </div>
 </template>
 

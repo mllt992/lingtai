@@ -19,7 +19,7 @@ async function close() {
 <template>
   <div class="titlebar drag-region">
     <div class="title">
-      <div class="logo">凌</div>
+      <img src="/loft-logo.png" alt="Loft" class="logo" draggable="false" />
       <span class="brand">凌台 · Loft</span>
       <span class="sub">桌面控制台</span>
     </div>
@@ -60,13 +60,10 @@ async function close() {
   width: 22px;
   height: 22px;
   border-radius: 6px;
-  display: grid;
-  place-items: center;
-  background: linear-gradient(135deg, var(--accent), var(--accent) 60%, rgba(255,255,255,0.2));
-  color: #fff;
-  font-weight: 700;
-  font-size: 12px;
-  letter-spacing: -1px;
+  object-fit: contain;
+  display: block;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 .brand {
   font-weight: 600;
