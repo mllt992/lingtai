@@ -8,15 +8,22 @@ export interface ShortcutEntry {
 
 export type ResourceKind = 'folder' | 'file' | 'url'
 
+export interface LauncherGroup {
+  id: string
+  name: string
+  order: number
+  collapsed?: boolean
+}
+
 export interface LauncherItem {
   id: string
+  groupId: string
   name: string
   path: string
   target?: string | null
   iconPath?: string | null
-  source: 'auto' | 'manual'
-  group?: string
-  pinned?: boolean
+  iconData?: string | null   // data:image/png;base64,...  抽取后缓存于此
+  order: number
   addedAt: number
 }
 

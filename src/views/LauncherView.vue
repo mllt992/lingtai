@@ -1,178 +1,341 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useLauncherStore } from '@/stores/launcher'
-import { useSettingsStore } from '@/stores/settings'
 import { useDrop } from '@/composables/useDrop'
 import PageHeader from '@/components/PageHeader.vue'
-import { open as openDialog } from '@tauri-apps/plugin-dialog'
+import AppIcon from '@/components/AppIcon.vue'
+import AddItemsDialog from '@/components/AddItemsDialog.vue'
+import ContextMenu, { type MenuItem } from '@/components/ContextMenu.vue'
+import PromptDialog from '@/components/PromptDialog.vue'
+import type { LauncherGroup, LauncherItem } from '@/types'
 
 const launcher = useLauncherStore()
-const settings = useSettingsStore()
 
-const showAddDialog = ref(false)
-const newName = ref('')
-const newPath = ref('')
+const showAdd = ref(false)
+const addTargetGroupId = ref('')
 const dropHint = ref(false)
+
+// 右键菜单
+const ctxOpen = ref(false)
+const ctxPos = ref({ x: 0, y: 0 })
+const ctxItems = ref<MenuItem[]>([])
+
+// 输入框 dialog
+type PromptKind =
+  | { kind: 'add-group' }
+  | { kind: 'rename-group'; group: LauncherGroup }
+  | { kind: 'rename-item'; item: LauncherItem }
+const prompt = ref<{
+  open: boolean
+  title: string
+  label: string
+  placeholder: string
+  initial: string
+  confirmText: string
+  danger?: boolean
+  payload?: PromptKind
+}>({
+  open: false,
+  title: '',
+  label: '',
+  placeholder: '',
+  initial: '',
+  confirmText: '确定'
+})
+
+// 拖拽状态
+const dragId = ref<string | null>(null)
+const dropTarget = ref<{ groupId: string; itemId: string | null } | null>(null)
 
 onMounted(async () => {
   await launcher.load()
-  if (settings.launcher.autoScan && launcher.autoApps.length === 0) {
-    launcher.scanApps()
-  }
+  // 后台扫描已装应用，供选择器使用
+  if (launcher.autoApps.length === 0) launcher.scanApps()
 })
 
+// 文件拖入：作为快捷启动项加入第一个分组
 useDrop(({ paths }) => {
-  // Treat each dropped path as a manual launcher item
+  const targetGroup = launcher.sortedGroups[0]
+  if (!targetGroup) return
   for (const p of paths) {
-    const name = p.split(/[\\\/]/).pop()?.replace(/\.(exe|lnk|url)$/i, '') || p
-    launcher.addLauncherItem(name, p)
+    const name = p.split(/[\\\/]/).pop()?.replace(/\.(exe|lnk|url|bat|cmd)$/i, '') || p
+    launcher.addItem(targetGroup.id, { name, path: p })
   }
-  flashDrop()
-})
-
-function flashDrop() {
   dropHint.value = true
   setTimeout(() => (dropHint.value = false), 1500)
+})
+
+function openAddDialog(groupId?: string) {
+  addTargetGroupId.value = groupId ?? launcher.sortedGroups[0]?.id ?? ''
+  showAdd.value = true
 }
 
-async function browseFile() {
-  const selected = await openDialog({
-    multiple: false,
-    directory: false,
-    filters: [
-      { name: '可执行 / 快捷方式', extensions: ['exe', 'lnk', 'bat', 'cmd', 'url'] },
-      { name: '所有文件', extensions: ['*'] }
-    ]
-  })
-  if (typeof selected === 'string') {
-    newPath.value = selected
-    if (!newName.value) {
-      newName.value =
-        selected.split(/[\\\/]/).pop()?.replace(/\.(exe|lnk|url)$/i, '') || ''
+// ====== 右键菜单 ======
+function showItemMenu(e: MouseEvent, item: LauncherItem) {
+  e.preventDefault()
+  const moveSubmenu: MenuItem[] = launcher.sortedGroups
+    .filter((g) => g.id !== item.groupId)
+    .map((g) => ({
+      label: g.name,
+      icon: 'i-carbon-folder',
+      onClick: () => launcher.moveItem(item.id, g.id)
+    }))
+  ctxItems.value = [
+    { label: '启动', icon: 'i-carbon-play-filled-alt', onClick: () => launcher.launchItem(item) },
+    {
+      label: '重命名',
+      icon: 'i-carbon-edit',
+      onClick: () => openPrompt({
+        kind: 'rename-item',
+        item
+      } as any, { title: '重命名', label: '新名称', initial: item.name })
+    },
+    {
+      label: '刷新图标',
+      icon: 'i-carbon-renew',
+      onClick: () => launcher.refreshIcon(item.id)
+    },
+    {
+      label: '移到分组',
+      icon: 'i-carbon-move',
+      disabled: moveSubmenu.length === 0,
+      submenu: moveSubmenu.length ? moveSubmenu : undefined
+    },
+    { divider: true, label: '' },
+    {
+      label: '复制路径',
+      icon: 'i-carbon-copy',
+      onClick: () => navigator.clipboard.writeText(item.path)
+    },
+    { divider: true, label: '' },
+    {
+      label: '从启动器移除',
+      icon: 'i-carbon-trash-can',
+      danger: true,
+      onClick: () => launcher.removeItem(item.id)
+    }
+  ]
+  ctxPos.value = { x: e.clientX, y: e.clientY }
+  ctxOpen.value = true
+}
+
+function showGroupMenu(e: MouseEvent, group: LauncherGroup) {
+  e.preventDefault()
+  e.stopPropagation()
+  ctxItems.value = [
+    {
+      label: '添加应用…',
+      icon: 'i-carbon-add',
+      onClick: () => openAddDialog(group.id)
+    },
+    {
+      label: '重命名',
+      icon: 'i-carbon-edit',
+      onClick: () => openPrompt({ kind: 'rename-group', group } as any, {
+        title: '重命名分组',
+        label: '分组名称',
+        initial: group.name
+      })
+    },
+    {
+      label: group.collapsed ? '展开' : '折叠',
+      icon: group.collapsed ? 'i-carbon-chevron-down' : 'i-carbon-chevron-up',
+      onClick: () => launcher.toggleGroupCollapsed(group.id)
+    },
+    { divider: true, label: '' },
+    {
+      label: '删除分组',
+      icon: 'i-carbon-trash-can',
+      danger: true,
+      disabled: launcher.groups.length <= 1,
+      onClick: () => removeGroupWithConfirm(group)
+    }
+  ]
+  ctxPos.value = { x: e.clientX, y: e.clientY }
+  ctxOpen.value = true
+}
+
+async function removeGroupWithConfirm(group: LauncherGroup) {
+  const items = launcher.itemsByGroup[group.id] ?? []
+  if (items.length === 0) {
+    await launcher.removeGroup(group.id)
+    return
+  }
+  // 若有条目，移到第一个其它分组
+  const fallback = launcher.sortedGroups.find((g) => g.id !== group.id)
+  if (fallback) {
+    if (confirm(`分组 "${group.name}" 内有 ${items.length} 项，移动到 "${fallback.name}" 后删除？`)) {
+      await launcher.removeGroup(group.id, fallback.id)
     }
   }
 }
 
-async function confirmAdd() {
-  if (!newPath.value.trim()) return
-  await launcher.addLauncherItem(newName.value, newPath.value)
-  newName.value = ''
-  newPath.value = ''
-  showAddDialog.value = false
+function openPrompt(payload: PromptKind, opts: Partial<typeof prompt.value>) {
+  prompt.value = {
+    open: true,
+    title: opts.title ?? '',
+    label: opts.label ?? '',
+    placeholder: opts.placeholder ?? '',
+    initial: opts.initial ?? '',
+    confirmText: opts.confirmText ?? '确定',
+    danger: opts.danger,
+    payload
+  }
 }
 
-function initials(name: string) {
-  return (name || '?').trim().charAt(0).toUpperCase()
+async function onPromptConfirm(value: string) {
+  const p = prompt.value.payload
+  prompt.value.open = false
+  if (!p || !value.trim()) return
+  switch (p.kind) {
+    case 'add-group':
+      await launcher.addGroup(value)
+      break
+    case 'rename-group':
+      await launcher.renameGroup(p.group.id, value)
+      break
+    case 'rename-item':
+      await launcher.renameItem(p.item.id, value)
+      break
+  }
 }
 
-const empty = computed(
-  () => launcher.filteredApps.length === 0 && launcher.filteredManual.length === 0
-)
+// ====== 拖拽 ======
+function onDragStart(e: DragEvent, item: LauncherItem) {
+  if (!e.dataTransfer) return
+  dragId.value = item.id
+  e.dataTransfer.effectAllowed = 'move'
+  e.dataTransfer.setData('text/plain', item.id)
+}
+function onDragEnd() {
+  dragId.value = null
+  dropTarget.value = null
+}
+function onCardDragOver(e: DragEvent, groupId: string, itemId: string) {
+  if (!dragId.value || dragId.value === itemId) return
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+  dropTarget.value = { groupId, itemId }
+}
+function onGroupDragOver(e: DragEvent, groupId: string) {
+  if (!dragId.value) return
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+  // 若已有更精细 itemId，保留；否则默认追加末尾
+  if (!dropTarget.value || dropTarget.value.groupId !== groupId) {
+    dropTarget.value = { groupId, itemId: null }
+  }
+}
+async function onDrop(e: DragEvent, groupId: string, itemId: string | null) {
+  e.preventDefault()
+  const src = dragId.value
+  if (!src) return
+  await launcher.dropItem(src, groupId, itemId)
+  dragId.value = null
+  dropTarget.value = null
+}
+
+const totalItems = computed(() => launcher.items.length)
+const empty = computed(() => totalItems.value === 0)
 </script>
 
 <template>
   <div class="page">
-    <PageHeader title="启动器" subtitle="自动扫描开始菜单 · 手动添加 · 拖拽即收纳">
+    <PageHeader title="启动器" subtitle="分组管理 · 拖拽排序 · 右键操作 · 拖入文件即收纳">
       <template #actions>
         <div class="search">
           <span class="i-carbon-search" />
-          <input v-model="launcher.keyword" placeholder="搜索 应用 / 别名…" />
+          <input v-model="launcher.keyword" placeholder="搜索 应用 / 路径…" />
         </div>
-        <button class="btn-ghost" @click="launcher.scanApps" :disabled="launcher.scanning">
-          <span class="i-carbon-renew" />
-          <span>{{ launcher.scanning ? '扫描中…' : '重新扫描' }}</span>
+        <button
+          class="btn-ghost"
+          @click="openPrompt({ kind: 'add-group' } as any, {
+            title: '新建分组',
+            label: '分组名称',
+            placeholder: '比如 开发 / 办公 / 娱乐',
+            confirmText: '新建'
+          })"
+        >
+          <span class="i-carbon-folder-add" /> 新分组
         </button>
-        <button class="btn-primary" @click="showAddDialog = true">
-          <span class="i-carbon-add" />
-          <span>添加</span>
+        <button class="btn-primary" @click="openAddDialog()">
+          <span class="i-carbon-add" /> 添加应用
         </button>
       </template>
     </PageHeader>
 
     <div class="body scrollbar-thin" :class="{ 'drop-active': dropHint }">
-      <section v-if="launcher.filteredManual.length" class="section">
-        <h3>
-          <span class="i-carbon-star-filled" /> 我的常用
-          <em>{{ launcher.filteredManual.length }}</em>
-        </h3>
-        <div class="grid">
-          <div
-            v-for="item in launcher.filteredManual"
-            :key="item.id"
-            class="card-hover app-card"
-            @dblclick="launcher.launchApp(item)"
-            :title="item.path"
-          >
-            <div class="logo" :style="{ background: 'var(--accent-soft)', color: 'var(--accent)' }">
-              {{ initials(item.name) }}
-            </div>
-            <div class="info">
-              <div class="name">{{ item.name }}</div>
-              <div class="path">{{ item.path }}</div>
-            </div>
-            <div class="actions">
-              <button
-                class="icon-btn"
-                title="启动"
-                @click.stop="launcher.launchApp(item)"
-              >
-                <span class="i-carbon-play-filled-alt" />
-              </button>
-              <button
-                class="icon-btn danger"
-                title="移除"
-                @click.stop="launcher.removeLauncherItem(item.id)"
-              >
-                <span class="i-carbon-trash-can" />
-              </button>
-            </div>
+      <section
+        v-for="group in launcher.sortedGroups"
+        :key="group.id"
+        class="group"
+        :class="{ collapsed: group.collapsed, 'is-drop': dropTarget?.groupId === group.id }"
+        @dragover="onGroupDragOver($event, group.id)"
+        @drop="onDrop($event, group.id, null)"
+      >
+        <header class="group-head" @contextmenu="showGroupMenu($event, group)">
+          <button class="caret" @click="launcher.toggleGroupCollapsed(group.id)">
+            <span
+              :class="group.collapsed ? 'i-carbon-chevron-right' : 'i-carbon-chevron-down'"
+            />
+          </button>
+          <h3>{{ group.name }}</h3>
+          <em>{{ (launcher.itemsByGroup[group.id] ?? []).length }}</em>
+          <div class="head-actions">
+            <button class="head-btn" title="添加" @click="openAddDialog(group.id)">
+              <span class="i-carbon-add" />
+            </button>
+            <button class="head-btn" title="更多" @click="showGroupMenu($event, group)">
+              <span class="i-carbon-overflow-menu-horizontal" />
+            </button>
           </div>
-        </div>
+        </header>
+
+        <transition name="slide">
+          <div v-if="!group.collapsed" class="grid">
+            <div
+              v-for="item in launcher.itemsByGroup[group.id] ?? []"
+              :key="item.id"
+              class="item-card"
+              :class="{
+                dragging: dragId === item.id,
+                'drop-before':
+                  dropTarget?.groupId === group.id && dropTarget?.itemId === item.id && dragId !== item.id
+              }"
+              draggable="true"
+              :title="item.target || item.path"
+              @click="launcher.launchItem(item)"
+              @contextmenu="showItemMenu($event, item)"
+              @dragstart="onDragStart($event, item)"
+              @dragend="onDragEnd"
+              @dragover="onCardDragOver($event, group.id, item.id)"
+              @drop="onDrop($event, group.id, item.id)"
+            >
+              <AppIcon :name="item.name" :icon-data="item.iconData" :size="44" :rounded="12" />
+              <div class="name">{{ item.name }}</div>
+            </div>
+            <button
+              v-if="(launcher.itemsByGroup[group.id] ?? []).length === 0"
+              class="empty-slot"
+              @click="openAddDialog(group.id)"
+            >
+              <span class="i-carbon-add" />
+              <span>添加到此分组</span>
+            </button>
+          </div>
+        </transition>
       </section>
 
-      <section class="section">
-        <h3>
-          <span class="i-carbon-application" /> 已安装应用
-          <em>{{ launcher.filteredApps.length }}</em>
-          <span v-if="launcher.scanning" class="hint">扫描中…</span>
-        </h3>
-        <div v-if="launcher.scanError" class="error">{{ launcher.scanError }}</div>
-        <div class="grid">
-          <div
-            v-for="app in launcher.filteredApps"
-            :key="app.path"
-            class="card-hover app-card"
-            @dblclick="launcher.launchApp(app)"
-            :title="app.target || app.path"
-          >
-            <div class="logo gradient">{{ initials(app.name) }}</div>
-            <div class="info">
-              <div class="name">{{ app.name }}</div>
-              <div class="path">{{ app.target || app.path }}</div>
-            </div>
-            <div class="actions">
-              <button
-                class="icon-btn"
-                title="启动"
-                @click.stop="launcher.launchApp(app)"
-              >
-                <span class="i-carbon-play-filled-alt" />
-              </button>
-              <button
-                class="icon-btn"
-                title="收藏到常用"
-                @click.stop="launcher.addLauncherItem(app.name, app.path)"
-              >
-                <span class="i-carbon-star" />
-              </button>
-            </div>
-          </div>
+      <div v-if="empty && launcher.groups.length === 1" class="empty-state">
+        <div class="empty-logo">
+          <span class="i-carbon-grid" />
         </div>
-        <div v-if="empty && !launcher.scanning" class="empty">
-          <div class="empty-icon i-carbon-folder-add" />
-          <p>暂无数据，点击 "重新扫描" 或 "添加"，也可直接把 .exe / .lnk 拖到这里。</p>
-        </div>
-      </section>
+        <h2>启动器还是空的</h2>
+        <p>点击右上角 <strong>"添加应用"</strong>，从已装软件里挑选，或者直接把 .exe / .lnk 拖到这里</p>
+        <button class="btn-primary big" @click="openAddDialog()">
+          <span class="i-carbon-add" /> 添加应用
+        </button>
+      </div>
 
       <transition name="fade">
         <div v-if="dropHint" class="drop-banner">
@@ -181,44 +344,30 @@ const empty = computed(
       </transition>
     </div>
 
-    <!-- Add Dialog -->
-    <transition name="fade">
-      <div v-if="showAddDialog" class="modal-mask" @click.self="showAddDialog = false">
-        <div class="modal">
-          <header>
-            <h2>添加启动项</h2>
-            <button class="icon-btn" @click="showAddDialog = false">
-              <span class="i-carbon-close" />
-            </button>
-          </header>
-          <div class="body">
-            <label class="field">
-              <span>名称（可选）</span>
-              <input v-model="newName" placeholder="比如 VSCode" class="input-base" />
-            </label>
-            <label class="field">
-              <span>路径</span>
-              <div class="row">
-                <input
-                  v-model="newPath"
-                  placeholder="C:\Program Files\…\app.exe"
-                  class="input-base flex-1"
-                />
-                <button class="btn-ghost" @click="browseFile">
-                  <span class="i-carbon-folder-open" /> 浏览
-                </button>
-              </div>
-            </label>
-          </div>
-          <footer>
-            <button class="btn-ghost" @click="showAddDialog = false">取消</button>
-            <button class="btn-primary" :disabled="!newPath.trim()" @click="confirmAdd">
-              确认添加
-            </button>
-          </footer>
-        </div>
-      </div>
-    </transition>
+    <AddItemsDialog
+      :open="showAdd"
+      :default-group-id="addTargetGroupId"
+      @close="showAdd = false"
+      @added="showAdd = false"
+    />
+    <ContextMenu
+      :open="ctxOpen"
+      :x="ctxPos.x"
+      :y="ctxPos.y"
+      :items="ctxItems"
+      @close="ctxOpen = false"
+    />
+    <PromptDialog
+      :open="prompt.open"
+      :title="prompt.title"
+      :label="prompt.label"
+      :placeholder="prompt.placeholder"
+      :initial="prompt.initial"
+      :confirm-text="prompt.confirmText"
+      :danger="prompt.danger"
+      @close="prompt.open = false"
+      @confirm="onPromptConfirm"
+    />
   </div>
 </template>
 
@@ -235,7 +384,7 @@ const empty = computed(
   gap: 8px;
   background: var(--bg-card);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: 10px;
   padding: 0 10px;
   height: 36px;
   color: var(--text-muted);
@@ -256,7 +405,7 @@ const empty = computed(
   padding: 0 12px;
   background: var(--bg-card);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: 10px;
   color: var(--text-muted);
   font-size: 13px;
   transition: all 0.15s;
@@ -273,7 +422,7 @@ const empty = computed(
   padding: 0 14px;
   background: var(--accent);
   color: #fff;
-  border-radius: var(--radius-md);
+  border-radius: 10px;
   font-weight: 500;
   font-size: 13px;
   transition: opacity 0.15s;
@@ -281,15 +430,17 @@ const empty = computed(
 .btn-primary:hover {
   opacity: 0.9;
 }
-.btn-primary:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
+.btn-primary.big {
+  height: 40px;
+  padding: 0 22px;
+  font-size: 14px;
+  margin-top: 14px;
 }
 
 .body {
   flex: 1;
   overflow-y: auto;
-  padding: 12px 24px 24px;
+  padding: 12px 20px 24px;
   position: relative;
 }
 .body.drop-active {
@@ -297,135 +448,185 @@ const empty = computed(
   outline-offset: -8px;
 }
 
-.section + .section {
-  margin-top: 24px;
+.group {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  margin-bottom: 12px;
+  padding: 4px 14px 12px;
+  transition: border-color 0.15s, background 0.15s;
 }
-.section h3 {
+.group.is-drop {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.group.collapsed {
+  padding-bottom: 4px;
+}
+
+.group-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
-  color: var(--text-muted);
-  font-weight: 500;
-  margin: 8px 0 12px;
-  letter-spacing: 0.4px;
+  padding: 6px 0 8px;
+  color: var(--text);
+  cursor: pointer;
 }
-.section h3 em {
+.caret {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  border-radius: 5px;
+}
+.caret:hover {
+  background: var(--bg-elev);
+  color: var(--text);
+}
+.group-head h3 {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+.group-head em {
   font-style: normal;
   font-size: 11px;
   color: var(--text-muted);
   background: var(--bg-elev);
-  padding: 2px 7px;
+  padding: 1px 7px;
   border-radius: 99px;
 }
-.section h3 .hint {
+.head-actions {
   margin-left: auto;
-  font-size: 11px;
-  color: var(--accent);
-}
-
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 10px;
-}
-
-.app-card {
   display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  transition: all 0.18s;
-  position: relative;
-  overflow: hidden;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.15s;
 }
-.app-card:hover {
-  border-color: var(--accent);
-  transform: translateY(-1px);
-  box-shadow: var(--shadow-card);
+.group:hover .head-actions {
+  opacity: 1;
 }
-.logo {
-  width: 38px;
-  height: 38px;
-  border-radius: var(--radius-md);
-  display: grid;
-  place-items: center;
-  font-weight: 600;
-  font-size: 16px;
-  flex-shrink: 0;
-}
-.logo.gradient {
-  background: linear-gradient(135deg, var(--accent), var(--accent-soft));
-  color: #fff;
-}
-.info {
-  min-width: 0;
-  flex: 1;
-}
-.name {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.path {
-  font-size: 11px;
-  color: var(--text-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-family: var(--font-mono);
-}
-.actions {
-  display: none;
-  gap: 4px;
-}
-.app-card:hover .actions {
-  display: flex;
-}
-.icon-btn {
-  width: 28px;
-  height: 28px;
+.head-btn {
+  width: 26px;
+  height: 26px;
   display: grid;
   place-items: center;
   border-radius: 6px;
   color: var(--text-muted);
+}
+.head-btn:hover {
   background: var(--bg-elev);
-  transition: all 0.15s;
-}
-.icon-btn:hover {
   color: var(--text);
-  background: var(--accent);
-  color: #fff;
-}
-.icon-btn.danger:hover {
-  background: var(--danger);
 }
 
-.empty {
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.item-card {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
-  padding: 60px 20px;
-  color: var(--text-muted);
+  gap: 6px;
+  padding: 10px 6px 8px;
+  background: transparent;
+  border: 1.5px solid transparent;
+  border-radius: 12px;
+  cursor: pointer;
+  user-select: none;
+  position: relative;
+  transition: all 0.15s;
 }
-.empty-icon {
-  font-size: 48px;
+.item-card:hover {
+  background: var(--bg-elev);
+  transform: translateY(-2px);
+}
+.item-card.dragging {
   opacity: 0.4;
 }
-.error {
-  padding: 10px 14px;
-  background: rgba(248, 113, 113, 0.12);
-  color: var(--danger);
-  border-radius: var(--radius-md);
-  font-size: 12.5px;
+.item-card.drop-before::before {
+  content: '';
+  position: absolute;
+  left: -4px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.item-card .name {
+  font-size: 11.5px;
+  color: var(--text);
+  text-align: center;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.empty-slot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 88px;
+  padding: 12px;
+  background: transparent;
+  border: 1.5px dashed var(--border);
+  border-radius: 12px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  transition: all 0.15s;
+}
+.empty-slot:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.empty-slot > span:first-child {
+  font-size: 22px;
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 70px 20px;
+  text-align: center;
+}
+.empty-logo {
+  width: 80px;
+  height: 80px;
+  border-radius: 22px;
+  background: var(--accent-soft);
+  display: grid;
+  place-items: center;
+  font-size: 36px;
+  color: var(--accent);
+  margin-bottom: 8px;
+}
+.empty-state h2 {
+  margin: 6px 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+}
+.empty-state p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+  max-width: 480px;
+}
+.empty-state strong {
+  color: var(--accent);
 }
 
 .drop-banner {
@@ -436,75 +637,28 @@ const empty = computed(
   background: var(--accent);
   color: #fff;
   padding: 10px 18px;
-  border-radius: var(--radius-md);
+  border-radius: 10px;
   font-size: 13px;
   font-weight: 500;
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  box-shadow: var(--shadow-elev);
-  z-index: 100;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  z-index: 150;
 }
 
-/* Modal */
-.modal-mask {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(4px);
-  display: grid;
-  place-items: center;
-  z-index: 200;
-}
-.modal {
-  width: 460px;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-elev);
+.slide-enter-active, .slide-leave-active {
+  transition: opacity 0.18s ease, max-height 0.22s ease, padding 0.18s ease;
   overflow: hidden;
 }
-.modal header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 18px;
-  border-bottom: 1px solid var(--border);
+.slide-enter-from, .slide-leave-to {
+  opacity: 0;
+  max-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
 }
-.modal h2 {
-  font-size: 15px;
-  font-weight: 600;
-  margin: 0;
-}
-.modal .body {
-  padding: 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  overflow: visible;
-}
-.field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 12.5px;
-  color: var(--text-muted);
-}
-.field input {
-  width: 100%;
-}
-.field .row {
-  display: flex;
-  gap: 8px;
-}
-.flex-1 {
-  flex: 1;
-}
-.modal footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  padding: 14px 18px;
-  border-top: 1px solid var(--border);
+.slide-enter-to, .slide-leave-from {
+  opacity: 1;
+  max-height: 1500px;
 }
 </style>

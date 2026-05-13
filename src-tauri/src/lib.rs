@@ -35,6 +35,7 @@ pub fn run() {
             commands::files::open_path,
             commands::files::reveal_in_explorer,
             commands::files::open_url,
+            commands::icons::extract_icon,
             commands::monitor::get_system_snapshot,
             commands::monitor::list_drives,
             commands::ports::list_user_ports,
