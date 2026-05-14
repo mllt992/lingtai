@@ -6,7 +6,7 @@ use state::AppState;
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Emitter, Manager, PhysicalPosition, WindowEvent};
+use tauri::{Emitter, Manager, WindowEvent};
 
 const TRAY_MAIN: &str = "loft-main";
 
@@ -41,68 +41,60 @@ fn toggle_hud(app: &tauri::AppHandle) {
     }
 }
 
-/// 把 HUD 定位到主显示器右上角，离边缘留 12 px
-fn position_hud_top_right(hud: &tauri::WebviewWindow) {
-    if let Ok(Some(monitor)) = hud.primary_monitor() {
-        let mon_pos = monitor.position();
-        let mon_size = monitor.size();
-        // outer_size 在某些时候是 0，先用配置的物理大小估算
-        let hud_w = hud
-            .outer_size()
-            .map(|s| s.width as i32)
-            .unwrap_or((360.0 * monitor.scale_factor()) as i32);
-        let margin_x = (12.0 * monitor.scale_factor()) as i32;
-        let margin_y = (12.0 * monitor.scale_factor()) as i32;
-        let x = mon_pos.x + mon_size.width as i32 - hud_w - margin_x;
-        let y = mon_pos.y + margin_y;
-        let _ = hud.set_position(PhysicalPosition { x, y });
-    }
-}
-
 /// 后台线程：每 2 秒采集指标，给 HUD 发 event，给主托盘更新图标 + tooltip
 fn spawn_metrics_loop(app_handle: tauri::AppHandle) {
     std::thread::spawn(move || {
-        tray::maybe_refresh_geo();
+        // 首次拉取地理信息（失败也无所谓，下次再试）
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tray::maybe_refresh_geo();
+        }));
 
         loop {
-            let (cpu_pct, mem_pct) = {
-                let state = app_handle.state::<AppState>();
-                let mut sys = state.sys.lock();
-                sys.refresh_cpu_usage();
-                sys.refresh_memory();
-                let cpu = sys.global_cpu_usage();
-                let mem = if sys.total_memory() > 0 {
-                    (sys.used_memory() as f32 / sys.total_memory() as f32) * 100.0
-                } else {
-                    0.0
-                };
-                (cpu, mem)
-            };
-            let temp = tray::read_cpu_temp();
-            tray::maybe_refresh_geo();
-            let geo = tray::current_geo();
-
-            // 1) 更新主托盘图标 + tooltip
-            if let Some(tray_icon) = app_handle.tray_by_id(TRAY_MAIN) {
-                let base = tray::base_icon();
-                let rgba = tray::render_icon_with_cpu(cpu_pct);
-                let image = Image::new_owned(rgba, base.width, base.height);
-                let _ = tray_icon.set_icon(Some(image));
-                let _ = tray_icon.set_tooltip(Some(tray::format_main_tooltip(
-                    cpu_pct,
-                    mem_pct,
-                    temp,
-                    geo.as_ref(),
-                )));
-            }
-
-            // 2) emit "metrics" 给 HUD（HUD 监听这个事件渲染）
-            let payload = tray::build_metrics(cpu_pct, mem_pct, temp, geo.as_ref());
-            let _ = app_handle.emit("metrics", payload);
-
+            // 整次采集 + 推送都用 catch_unwind 包起来 ——
+            // 任何单次错误（系统调用失败、emit 失败等）都不会击穿后台线程。
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_metrics_tick(&app_handle);
+            }));
             std::thread::sleep(std::time::Duration::from_secs(2));
         }
     });
+}
+
+fn run_metrics_tick(app_handle: &tauri::AppHandle) {
+    let (cpu_pct, mem_pct) = {
+        let state = app_handle.state::<AppState>();
+        let mut sys = state.sys.lock();
+        sys.refresh_cpu_usage();
+        sys.refresh_memory();
+        let cpu = sys.global_cpu_usage();
+        let mem = if sys.total_memory() > 0 {
+            (sys.used_memory() as f32 / sys.total_memory() as f32) * 100.0
+        } else {
+            0.0
+        };
+        (cpu, mem)
+    };
+    let temp = tray::read_cpu_temp();
+    tray::maybe_refresh_geo();
+    let geo = tray::current_geo();
+
+    // 1) 主托盘图标 + tooltip
+    if let Some(tray_icon) = app_handle.tray_by_id(TRAY_MAIN) {
+        let base = tray::base_icon();
+        let rgba = tray::render_icon_with_cpu(cpu_pct);
+        let image = Image::new_owned(rgba, base.width, base.height);
+        let _ = tray_icon.set_icon(Some(image));
+        let _ = tray_icon.set_tooltip(Some(tray::format_main_tooltip(
+            cpu_pct,
+            mem_pct,
+            temp,
+            geo.as_ref(),
+        )));
+    }
+
+    // 2) emit "metrics" 给 HUD
+    let payload = tray::build_metrics(cpu_pct, mem_pct, temp, geo.as_ref());
+    let _ = app_handle.emit("metrics", payload);
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -162,13 +154,9 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // ===== HUD 窗口：定位到右上角 + 显示 =====
-            if let Some(hud) = app.get_webview_window("hud") {
-                // 等 webview 加载完后再定位（不然 outer_size 可能不准）
-                position_hud_top_right(&hud);
-                let _ = hud.show();
-                let _ = hud.set_always_on_top(true);
-            }
+            // HUD 窗口完全交给前端管理（visible: true 已在配置里），
+            // 在这里不做任何 show / set_position / set_always_on_top —— 任何 setup 阶段
+            // 的 HUD API 失败都可能拖垮整个 app 启动。前端 onMounted 自己定位。
 
             // ===== 后台数据循环（更新托盘 + emit metrics 给 HUD） =====
             spawn_metrics_loop(app.handle().clone());

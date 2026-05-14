@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { getCurrentWindow } from '@tauri-apps/api/window'
+import { getCurrentWindow, PhysicalPosition, primaryMonitor } from '@tauri-apps/api/window'
 
 interface Metrics {
   cpu_pct: number
@@ -17,10 +17,30 @@ const m = ref<Metrics | null>(null)
 let unlisten: UnlistenFn | null = null
 const win = getCurrentWindow()
 
+async function positionTopRight() {
+  try {
+    const monitor = await primaryMonitor()
+    if (!monitor) return
+    const size = await win.outerSize()
+    const margin = Math.round(12 * monitor.scaleFactor)
+    const x = monitor.position.x + monitor.size.width - size.width - margin
+    const y = monitor.position.y + margin
+    await win.setPosition(new PhysicalPosition(x, y))
+  } catch (e) {
+    console.warn('[HUD] position failed:', e)
+  }
+}
+
 onMounted(async () => {
-  unlisten = await listen<Metrics>('metrics', (event) => {
-    m.value = event.payload
-  })
+  // 第一时间贴右上角；失败也不报错（用户可以拖动）
+  await positionTopRight()
+  try {
+    unlisten = await listen<Metrics>('metrics', (event) => {
+      m.value = event.payload
+    })
+  } catch (e) {
+    console.error('[HUD] listen failed:', e)
+  }
 })
 onBeforeUnmount(() => {
   if (unlisten) unlisten()
