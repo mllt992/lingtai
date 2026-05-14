@@ -129,21 +129,13 @@ if ($Installer) {
         if ($Open) { Invoke-Item $bundle }
     }
 } else {
-    Step "3/4  打包前端"
-    pnpm build
-    if ($LASTEXITCODE -ne 0) { Fail "前端打包失败" }
-    Ok "前端 dist 就绪"
+    Step "3/4  Tauri 构建（跳过安装包，仅生成 loft.exe）"
+    # 走官方 tauri build --no-bundle，确保 release 模式下嵌入前端资源、
+    # 避免 cargo 缓存的 dev 配置导致 exe 仍指向 localhost:1420
+    pnpm exec tauri build --no-bundle
+    if ($LASTEXITCODE -ne 0) { Fail "tauri build 失败" }
 
-    Step "4/4  编译 Rust release"
-    Push-Location src-tauri
-    try {
-        cargo build --release
-        if ($LASTEXITCODE -ne 0) { Fail "cargo build 失败" }
-    } finally {
-        Pop-Location
-    }
-
-    # 拷贝到 dist-exe/
+    Step "4/4  拷贝 EXE 到 dist-exe/"
     if (-not (Test-Path 'dist-exe')) { New-Item -ItemType Directory 'dist-exe' | Out-Null }
     $exeSrc = 'src-tauri\target\release\loft.exe'
     if (-not (Test-Path $exeSrc)) { Fail "找不到 loft.exe（位置：$exeSrc）" }
