@@ -51,5 +51,7 @@ gpu-nvml = ["nvml-wrapper"]
 opt-level = "s"
 lto = true
 codegen-units = 1
-strip = true
-panic = "abort"
+strip = "debuginfo"
+# 故意保留 unwind —— 让 panic 走完 hook 把堆栈写进 boot.log 再退出
+# (abort 模式下 hook 来不及刷盘，崩溃只剩下 0xC0000409 异常码)
+panic = "unwind"

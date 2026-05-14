@@ -24,17 +24,17 @@ body {
   user-select: none;
 }
 
-/* HUD 窗口：完全透明背景（透出毛玻璃效果） */
+/* HUD 窗口：纯实色深底（不再走 transparent，避免某些 Win 配置 WebView2 渲染崩溃） */
 html.hud,
-body.hud,
-html.hud #app,
-body.hud #app {
-  background: transparent !important;
-}
-html.hud, body.hud {
+body.hud {
+  background: #0f172a !important;  /* slate-900 */
   margin: 0;
   padding: 0;
   overflow: hidden;
+}
+html.hud #app,
+body.hud #app {
+  background: #0f172a !important;
 }
 
 button,

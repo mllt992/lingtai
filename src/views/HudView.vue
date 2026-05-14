@@ -121,19 +121,13 @@ async function onContextMenu(e: MouseEvent) {
 
 <style scoped>
 .hud {
-  height: 40px;
+  height: 44px;
   padding: 0 14px;
   display: flex;
   align-items: center;
   gap: 6px;
-  background: rgba(15, 23, 42, 0.82);
-  backdrop-filter: blur(12px) saturate(140%);
-  -webkit-backdrop-filter: blur(12px) saturate(140%);
-  border-radius: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow:
-    0 8px 24px rgba(0, 0, 0, 0.28),
-    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  background: #0f172a;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   user-select: none;
   -webkit-user-select: none;
   cursor: grab;

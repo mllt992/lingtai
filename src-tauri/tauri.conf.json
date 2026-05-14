@@ -28,15 +28,13 @@
         "label": "hud",
         "title": "Loft HUD",
         "width": 360,
-        "height": 40,
+        "height": 44,
         "decorations": false,
-        "transparent": true,
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "resizable": false,
-        "shadow": false,
         "focus": false,
-        "visible": true
+        "visible": false
       }
     ],
     "security": {

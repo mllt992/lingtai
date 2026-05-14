@@ -25,6 +25,9 @@ fn append_line(line: &str) {
         if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&p) {
             let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
             let _ = writeln!(f, "[{}] {}", ts, line);
+            // 立刻 flush + sync 到磁盘 —— 防止崩溃时缓冲区数据丢失
+            let _ = f.flush();
+            let _ = f.sync_all();
         }
     }
 }
@@ -67,6 +70,8 @@ pub fn install_crash_logger() {
                 }
                 let bt = std::backtrace::Backtrace::force_capture();
                 let _ = writeln!(f, "Backtrace:\n{}", bt);
+                let _ = f.flush();
+                let _ = f.sync_all();
             }
         }
 
