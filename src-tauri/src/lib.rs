@@ -1,7 +1,9 @@
 mod commands;
+mod diag;
 mod state;
 mod tray;
 
+use diag::{log_step, install_crash_logger};
 use state::AppState;
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -9,18 +11,6 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{Emitter, Manager, WindowEvent};
 
 const TRAY_MAIN: &str = "loft-main";
-
-fn install_panic_filter() {
-    let prev = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        if let Some(loc) = info.location() {
-            if loc.file().contains("lnk-0.5") {
-                return;
-            }
-        }
-        prev(info);
-    }));
-}
 
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -41,17 +31,12 @@ fn toggle_hud(app: &tauri::AppHandle) {
     }
 }
 
-/// 后台线程：每 2 秒采集指标，给 HUD 发 event，给主托盘更新图标 + tooltip
 fn spawn_metrics_loop(app_handle: tauri::AppHandle) {
     std::thread::spawn(move || {
-        // 首次拉取地理信息（失败也无所谓，下次再试）
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             tray::maybe_refresh_geo();
         }));
-
         loop {
-            // 整次采集 + 推送都用 catch_unwind 包起来 ——
-            // 任何单次错误（系统调用失败、emit 失败等）都不会击穿后台线程。
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 run_metrics_tick(&app_handle);
             }));
@@ -78,7 +63,6 @@ fn run_metrics_tick(app_handle: &tauri::AppHandle) {
     tray::maybe_refresh_geo();
     let geo = tray::current_geo();
 
-    // 1) 主托盘图标 + tooltip
     if let Some(tray_icon) = app_handle.tray_by_id(TRAY_MAIN) {
         let base = tray::base_icon();
         let rgba = tray::render_icon_with_cpu(cpu_pct);
@@ -92,103 +76,132 @@ fn run_metrics_tick(app_handle: &tauri::AppHandle) {
         )));
     }
 
-    // 2) emit "metrics" 给 HUD
     let payload = tray::build_metrics(cpu_pct, mem_pct, temp, geo.as_ref());
     let _ = app_handle.emit("metrics", payload);
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    install_panic_filter();
+    diag::attach_console();
+    install_crash_logger();
+    log_step("=== Loft starting ===");
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
-        .manage(AppState::new())
-        .setup(|app| {
-            // ===== 系统托盘 (单个 LOGO 图标 + 菜单) =====
-            let show_item =
-                MenuItem::with_id(app, "tray-show", "显示主窗口", true, None::<&str>)?;
-            let hud_item =
-                MenuItem::with_id(app, "tray-hud", "切换数据面板", true, None::<&str>)?;
-            let sep = PredefinedMenuItem::separator(app)?;
-            let quit_item =
-                MenuItem::with_id(app, "tray-quit", "退出 Loft", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_item, &hud_item, &sep, &quit_item])?;
+    let builder_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tauri::Builder::default()
+            .plugin(tauri_plugin_shell::init())
+            .plugin(tauri_plugin_dialog::init())
+            .plugin(tauri_plugin_opener::init())
+            .manage(AppState::new())
+            .setup(|app| {
+                log_step("setup: begin");
 
-            let main_icon = app
-                .default_window_icon()
-                .cloned()
-                .expect("window icon should be configured in tauri.conf.json");
+                log_step("setup: building tray menu");
+                let show_item = MenuItem::with_id(
+                    app,
+                    "tray-show",
+                    "显示主窗口",
+                    true,
+                    None::<&str>,
+                )?;
+                let hud_item = MenuItem::with_id(
+                    app,
+                    "tray-hud",
+                    "切换数据面板",
+                    true,
+                    None::<&str>,
+                )?;
+                let sep = PredefinedMenuItem::separator(app)?;
+                let quit_item = MenuItem::with_id(
+                    app,
+                    "tray-quit",
+                    "退出 Loft",
+                    true,
+                    None::<&str>,
+                )?;
+                let menu =
+                    Menu::with_items(app, &[&show_item, &hud_item, &sep, &quit_item])?;
 
-            TrayIconBuilder::with_id(TRAY_MAIN)
-                .tooltip("凌台 · Loft")
-                .icon(main_icon)
-                .menu(&menu)
-                .show_menu_on_left_click(false)
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "tray-show" => show_main_window(app),
-                    "tray-hud" => toggle_hud(app),
-                    "tray-quit" => app.exit(0),
-                    _ => {}
-                })
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
-                            let visible = window.is_visible().unwrap_or(false);
-                            let focused = window.is_focused().unwrap_or(false);
-                            if visible && focused {
-                                let _ = window.hide();
-                            } else {
-                                show_main_window(app);
+                log_step("setup: resolving window icon");
+                // 安全获取 icon —— 若 None 用 1x1 透明兜底（极端情况下别让 .expect() 直接 panic）
+                let main_icon = match app.default_window_icon().cloned() {
+                    Some(i) => i,
+                    None => {
+                        log_step("setup: WARN default_window_icon was None, using fallback");
+                        Image::new_owned(vec![0u8, 0u8, 0u8, 0u8], 1, 1)
+                    }
+                };
+
+                log_step("setup: building tray icon");
+                let _ = TrayIconBuilder::with_id(TRAY_MAIN)
+                    .tooltip("凌台 · Loft")
+                    .icon(main_icon)
+                    .menu(&menu)
+                    .show_menu_on_left_click(false)
+                    .on_menu_event(|app, event| match event.id.as_ref() {
+                        "tray-show" => show_main_window(app),
+                        "tray-hud" => toggle_hud(app),
+                        "tray-quit" => app.exit(0),
+                        _ => {}
+                    })
+                    .on_tray_icon_event(|tray, event| {
+                        if let TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        } = event
+                        {
+                            let app = tray.app_handle();
+                            if let Some(window) = app.get_webview_window("main") {
+                                let visible = window.is_visible().unwrap_or(false);
+                                let focused = window.is_focused().unwrap_or(false);
+                                if visible && focused {
+                                    let _ = window.hide();
+                                } else {
+                                    show_main_window(app);
+                                }
                             }
                         }
+                    })
+                    .build(app)?;
+                log_step("setup: tray icon built");
+
+                log_step("setup: spawning metrics loop");
+                spawn_metrics_loop(app.handle().clone());
+
+                log_step("setup: complete");
+                Ok(())
+            })
+            .on_window_event(|window, event| {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    if window.label() == "main" || window.label() == "hud" {
+                        api.prevent_close();
+                        let _ = window.hide();
                     }
-                })
-                .build(app)?;
-
-            // HUD 窗口完全交给前端管理（visible: true 已在配置里），
-            // 在这里不做任何 show / set_position / set_always_on_top —— 任何 setup 阶段
-            // 的 HUD API 失败都可能拖垮整个 app 启动。前端 onMounted 自己定位。
-
-            // ===== 后台数据循环（更新托盘 + emit metrics 给 HUD） =====
-            spawn_metrics_loop(app.handle().clone());
-
-            Ok(())
-        })
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                // main 关闭 → 隐藏到托盘；hud 关闭 → 真隐藏
-                if window.label() == "main" || window.label() == "hud" {
-                    api.prevent_close();
-                    let _ = window.hide();
                 }
-            }
-        })
-        .invoke_handler(tauri::generate_handler![
-            commands::launcher::scan_start_menu,
-            commands::launcher::resolve_shortcut,
-            commands::launcher::launch_path,
-            commands::files::open_path,
-            commands::files::reveal_in_explorer,
-            commands::files::open_url,
-            commands::icons::extract_icon,
-            commands::monitor::get_system_snapshot,
-            commands::monitor::list_drives,
-            commands::ports::list_user_ports,
-            commands::ports::kill_process,
-            commands::settings::load_settings,
-            commands::settings::save_settings,
-            commands::settings::load_items,
-            commands::settings::save_items,
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running Loft");
+            })
+            .invoke_handler(tauri::generate_handler![
+                commands::launcher::scan_start_menu,
+                commands::launcher::resolve_shortcut,
+                commands::launcher::launch_path,
+                commands::files::open_path,
+                commands::files::reveal_in_explorer,
+                commands::files::open_url,
+                commands::icons::extract_icon,
+                commands::monitor::get_system_snapshot,
+                commands::monitor::list_drives,
+                commands::ports::list_user_ports,
+                commands::ports::kill_process,
+                commands::settings::load_settings,
+                commands::settings::save_settings,
+                commands::settings::load_items,
+                commands::settings::save_items,
+            ])
+            .run(tauri::generate_context!())
+    }));
+
+    match builder_result {
+        Ok(Ok(())) => log_step("=== Loft exited normally ==="),
+        Ok(Err(e)) => log_step(&format!("=== Tauri runtime error: {} ===", e)),
+        Err(_) => log_step("=== Builder panicked (see backtrace above) ==="),
+    }
 }
