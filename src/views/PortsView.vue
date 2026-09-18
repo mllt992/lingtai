@@ -131,7 +131,7 @@ async function doKill() {
         </label>
         <button class="btn-ghost" :disabled="ports.loading" @click="ports.refresh()">
           <span class="i-carbon-renew" :class="{ spin: ports.loading }" />
-          <span>刷新</span>
+          <span class="btn-text">刷新</span>
         </button>
       </template>
     </PageHeader>
@@ -478,5 +478,20 @@ async function doKill() {
   border-radius: var(--radius-md);
   font-size: 13px;
   font-weight: 500;
+}
+
+:global(html[data-ui-mode='mini'] .body) {
+  padding: 8px 10px 16px;
+  overflow-x: auto;
+}
+:global(html[data-ui-mode='mini'] .search) {
+  min-width: 0;
+}
+:global(html[data-ui-mode='mini'] .table) {
+  min-width: 620px;
+}
+:global(html[data-ui-mode='mini'] .btn-ghost) {
+  height: 32px;
+  padding: 0 10px;
 }
 </style>

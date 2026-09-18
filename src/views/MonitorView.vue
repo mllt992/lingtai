@@ -53,7 +53,7 @@ const uptime = computed(() => {
           {{ monitor.polling ? '实时' : '已暂停' }}
         </div>
         <button class="btn-ghost" @click="monitor.refreshDrives()">
-          <span class="i-carbon-renew" /> 刷新磁盘
+          <span class="i-carbon-renew" /> <span class="btn-text">刷新磁盘</span>
         </button>
       </template>
     </PageHeader>
@@ -400,5 +400,20 @@ const uptime = computed(() => {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+:global(html[data-ui-mode='mini'] .body) {
+  padding: 8px 10px 16px;
+  gap: 10px;
+}
+:global(html[data-ui-mode='mini'] .stats),
+:global(html[data-ui-mode='mini'] .charts),
+:global(html[data-ui-mode='mini'] .drive-grid),
+:global(html[data-ui-mode='mini'] .gpu-grid) {
+  grid-template-columns: 1fr;
+}
+:global(html[data-ui-mode='mini'] .mem-detail) {
+  flex-wrap: wrap;
+  gap: 8px;
 }
 </style>

@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, inject, onMounted, ref } from 'vue'
 import { useLauncherStore } from '@/stores/launcher'
+import { windowModeKey } from '@/composables/useWindowMode'
 import { useDrop } from '@/composables/useDrop'
 import PageHeader from '@/components/PageHeader.vue'
 import AppIcon from '@/components/AppIcon.vue'
@@ -10,6 +11,8 @@ import PromptDialog from '@/components/PromptDialog.vue'
 import type { LauncherGroup, LauncherItem } from '@/types'
 
 const launcher = useLauncherStore()
+const wm = inject(windowModeKey)
+const iconSize = computed(() => (wm?.isMini.value ? 36 : 44))
 
 const showAdd = ref(false)
 const addTargetGroupId = ref('')
@@ -53,6 +56,12 @@ onMounted(async () => {
   if (launcher.autoApps.length === 0) launcher.scanApps()
 })
 
+function onLaunch(item: LauncherItem) {
+  launcher.launchItem(item).catch((e) => {
+    console.warn('[launcher] open failed:', e)
+  })
+}
+
 // 文件拖入：作为快捷启动项加入第一个分组
 useDrop(({ paths }) => {
   const targetGroup = launcher.sortedGroups[0]
@@ -81,7 +90,13 @@ function showItemMenu(e: MouseEvent, item: LauncherItem) {
       onClick: () => launcher.moveItem(item.id, g.id)
     }))
   ctxItems.value = [
-    { label: '启动', icon: 'i-carbon-play-filled-alt', onClick: () => launcher.launchItem(item) },
+    { label: '启动', icon: 'i-carbon-play-filled-alt', onClick: () => onLaunch(item) },
+    {
+      label: '修复路径',
+      icon: 'i-carbon-road',
+      disabled: launcher.pathHealth[item.id]?.status !== 'recoverable',
+      onClick: () => launcher.repairItemById(item.id)
+    },
     {
       label: '重命名',
       icon: 'i-carbon-edit',
@@ -256,10 +271,10 @@ const empty = computed(() => totalItems.value === 0)
             confirmText: '新建'
           })"
         >
-          <span class="i-carbon-folder-add" /> 新分组
+          <span class="i-carbon-folder-add" /> <span class="btn-text">新分组</span>
         </button>
         <button class="btn-primary" @click="openAddDialog()">
-          <span class="i-carbon-add" /> 添加应用
+          <span class="i-carbon-add" /> <span class="btn-text">添加应用</span>
         </button>
       </template>
     </PageHeader>
@@ -304,15 +319,25 @@ const empty = computed(() => totalItems.value === 0)
               }"
               draggable="true"
               :title="item.target || item.path"
-              @click="launcher.launchItem(item)"
+              @click="onLaunch(item)"
               @contextmenu="showItemMenu($event, item)"
               @dragstart="onDragStart($event, item)"
               @dragend="onDragEnd"
               @dragover="onCardDragOver($event, group.id, item.id)"
               @drop="onDrop($event, group.id, item.id)"
             >
-              <AppIcon :name="item.name" :icon-data="item.iconData" :size="44" :rounded="12" />
+              <AppIcon :name="item.name" :icon-data="item.iconData" :size="iconSize" :rounded="12" />
               <div class="name">{{ item.name }}</div>
+              <span
+                v-if="launcher.pathHealth[item.id]?.status === 'missing'"
+                class="path-badge missing"
+                title="路径失效"
+              />
+              <span
+                v-else-if="launcher.pathHealth[item.id]?.status === 'recoverable'"
+                class="path-badge recoverable"
+                title="绝对路径失效，相对路径可用，可右键修复"
+              />
             </div>
             <button
               v-if="(launcher.itemsByGroup[group.id] ?? []).length === 0"
@@ -568,6 +593,21 @@ const empty = computed(() => totalItems.value === 0)
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.path-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--bg);
+}
+.path-badge.missing {
+  background: var(--danger, #ef4444);
+}
+.path-badge.recoverable {
+  background: var(--warning, #f59e0b);
+}
 
 .empty-slot {
   display: flex;
@@ -660,5 +700,24 @@ const empty = computed(() => totalItems.value === 0)
 .slide-enter-to, .slide-leave-from {
   opacity: 1;
   max-height: 1500px;
+}
+
+:global(html[data-ui-mode='mini'] .body) {
+  padding: 8px 10px 16px;
+}
+:global(html[data-ui-mode='mini'] .grid) {
+  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  gap: 4px;
+}
+:global(html[data-ui-mode='mini'] .item-card) {
+  padding: 8px 4px 6px;
+}
+:global(html[data-ui-mode='mini'] .search) {
+  min-width: 0;
+}
+:global(html[data-ui-mode='mini'] .btn-ghost),
+:global(html[data-ui-mode='mini'] .btn-primary) {
+  height: 32px;
+  padding: 0 10px;
 }
 </style>

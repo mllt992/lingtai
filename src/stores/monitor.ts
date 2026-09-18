@@ -18,6 +18,7 @@ export const useMonitorStore = defineStore('monitor', {
     polling: false,
     intervalMs: 1000,
     error: null as string | null,
+    inflight: false,
     _timer: null as ReturnType<typeof setInterval> | null
   }),
   getters: {
@@ -30,6 +31,9 @@ export const useMonitorStore = defineStore('monitor', {
   },
   actions: {
     async refreshOnce() {
+      // 防重入：上一次采样未返回时不叠 invoke，避免后端变慢时请求堆积
+      if (this.inflight) return
+      this.inflight = true
       try {
         const snap = await invoke<SystemSnapshot>('get_system_snapshot')
         this.snapshot = snap
@@ -43,6 +47,8 @@ export const useMonitorStore = defineStore('monitor', {
         this.error = null
       } catch (e: any) {
         this.error = String(e)
+      } finally {
+        this.inflight = false
       }
     },
     async refreshDrives() {

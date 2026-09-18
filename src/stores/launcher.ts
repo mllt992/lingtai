@@ -1,8 +1,14 @@
 import { defineStore } from 'pinia'
 import { invoke } from '@tauri-apps/api/core'
+import { useSettingsStore } from '@/stores/settings'
 import type {
   LauncherGroup,
   LauncherItem,
+  PathCheckItem,
+  PathCheckResult,
+  PathHealth,
+  RelPathResult,
+  ResolveEffectivePathResult,
   ResourceGroup,
   ResourceItem,
   ResourceKind,
@@ -16,6 +22,18 @@ interface PersistedShapeV3 {
   resourceGroups: ResourceGroup[]
   resources: ResourceItem[]
 }
+
+export interface PendingPathRepair {
+  targetKind: 'launcher' | 'resource'
+  targetId: string
+  name: string
+  oldPath: string
+  newPath: string
+  /** 确认后是否继续启动/打开 */
+  continueOpen: boolean
+}
+
+type RepairChoice = 'repair-open' | 'open-once' | 'cancel'
 
 const DEFAULT_LAUNCHER_GID = 'default'
 const DEFAULT_RES_GID = 'res-default'
@@ -40,7 +58,11 @@ function migrate(raw: any): PersistedShapeV3 {
   let items: LauncherItem[] = []
   if (raw?.version === 2 && Array.isArray(raw.groups)) {
     groups = raw.groups
-    items = raw.items ?? []
+    items = (raw.items ?? []).map((it: any) => ({
+      ...it,
+      relPath: it.relPath ?? null,
+      rootHint: it.rootHint ?? null
+    }))
   } else if (Array.isArray(raw?.launcherItems)) {
     // v1
     groups = [
@@ -55,6 +77,8 @@ function migrate(raw: any): PersistedShapeV3 {
       groupId: DEFAULT_LAUNCHER_GID,
       name: it.name,
       path: it.path,
+      relPath: it.relPath ?? null,
+      rootHint: it.rootHint ?? null,
       target: it.target ?? null,
       iconPath: it.iconPath ?? null,
       iconData: it.iconData ?? null,
@@ -87,6 +111,8 @@ function migrate(raw: any): PersistedShapeV3 {
       name: r.name,
       kind: r.kind,
       path: r.path,
+      relPath: r.relPath ?? null,
+      rootHint: r.rootHint ?? null,
       order: r.order ?? i,
       addedAt: r.addedAt ?? Date.now()
     }))
@@ -116,6 +142,8 @@ function migrate(raw: any): PersistedShapeV3 {
           name: r.name,
           kind: r.kind,
           path: r.path,
+          relPath: r.relPath ?? null,
+          rootHint: r.rootHint ?? null,
           order: i,
           addedAt: r.addedAt ?? Date.now()
         })
@@ -139,7 +167,11 @@ export const useLauncherStore = defineStore('launcher', {
     resources: [] as ResourceItem[],
     scanning: false,
     scanError: null as string | null,
-    keyword: ''
+    keyword: '',
+    pathHealth: {} as Record<string, PathHealth>,
+    checkingPaths: false,
+    pendingPathRepair: null as PendingPathRepair | null,
+    pathRepairResolver: null as ((choice: RepairChoice) => void) | null
   }),
   getters: {
     sortedGroups(state): LauncherGroup[] {
@@ -193,6 +225,13 @@ export const useLauncherStore = defineStore('launcher', {
   },
   actions: {
     async load() {
+      if (!('__TAURI_INTERNALS__' in window)) {
+        console.warn('[launcher] load skipped: no Tauri internals')
+        return
+      }
+      // 父组件 settings.load 可能晚于本 store，先确保 pathRoots 就绪
+      const settings = useSettingsStore()
+      if (!settings.loaded) await settings.load()
       const data = await invoke<any>('load_items')
       const m = migrate(data)
       this.groups = m.groups
@@ -200,6 +239,7 @@ export const useLauncherStore = defineStore('launcher', {
       this.resourceGroups = m.resourceGroups
       this.resources = m.resources
       if (!data || data.version !== 3) await this.persist()
+      void this.checkHealth()
     },
     async persist() {
       const payload: PersistedShapeV3 = {
@@ -266,16 +306,29 @@ export const useLauncherStore = defineStore('launcher', {
     },
 
     // ============ Launcher 条目 ============
+    async _computeRel(path: string): Promise<{ relPath: string | null; rootHint: string | null }> {
+      const roots = useSettingsStore().launcher.pathRoots ?? []
+      if (!roots.length || !path) return { relPath: null, rootHint: null }
+      try {
+        const r = await invoke<RelPathResult>('compute_rel_path_cmd', { path, roots })
+        return { relPath: r.rel_path ?? null, rootHint: r.root_hint ?? null }
+      } catch {
+        return { relPath: null, rootHint: null }
+      }
+    },
     async addItem(
       groupId: string,
       input: { name: string; path: string; target?: string | null }
     ): Promise<LauncherItem> {
       const order = this._nextLauncherOrder(groupId)
+      const rel = await this._computeRel(input.path)
       const item: LauncherItem = {
         id: uid(),
         groupId,
         name: input.name.trim() || input.path,
         path: input.path,
+        relPath: rel.relPath,
+        rootHint: rel.rootHint,
         target: input.target ?? null,
         iconPath: null,
         iconData: null,
@@ -291,11 +344,14 @@ export const useLauncherStore = defineStore('launcher', {
       let order = this._nextLauncherOrder(groupId)
       const created: LauncherItem[] = []
       for (const e of entries) {
+        const rel = await this._computeRel(e.path)
         const item: LauncherItem = {
           id: uid(),
           groupId,
           name: e.name,
           path: e.path,
+          relPath: rel.relPath,
+          rootHint: rel.rootHint,
           target: e.target ?? null,
           iconPath: e.icon_path ?? null,
           iconData: null,
@@ -420,12 +476,15 @@ export const useLauncherStore = defineStore('launcher', {
       path: string,
       kind: ResourceKind
     ): Promise<ResourceItem> {
+      const rel = kind === 'url' ? { relPath: null, rootHint: null } : await this._computeRel(path)
       const r: ResourceItem = {
         id: uid(),
         groupId,
         name: name.trim() || path,
         kind,
         path,
+        relPath: rel.relPath,
+        rootHint: rel.rootHint,
         order: this._nextResourceOrder(groupId),
         addedAt: Date.now()
       }
@@ -474,14 +533,218 @@ export const useLauncherStore = defineStore('launcher', {
 
     // ============ 启动 / 打开 ============
     async launchItem(item: LauncherItem | ShortcutEntry) {
-      await invoke('launch_path', { path: item.path })
+      const full = 'id' in item ? (item as LauncherItem) : null
+      await this._openWithFallback({
+        targetKind: 'launcher',
+        targetId: full?.id ?? '',
+        name: full?.name ?? item.name,
+        path: item.path,
+        relPath: full?.relPath ?? null,
+        rootHint: full?.rootHint ?? null,
+        open: (p) => invoke('launch_path', { path: p })
+      })
     },
     async openResource(item: ResourceItem) {
       if (item.kind === 'url') {
         await invoke('open_url', { url: item.path })
-      } else {
-        await invoke('open_path', { path: item.path })
+        return
       }
+      await this._openWithFallback({
+        targetKind: 'resource',
+        targetId: item.id,
+        name: item.name,
+        path: item.path,
+        relPath: item.relPath ?? null,
+        rootHint: item.rootHint ?? null,
+        open: (p) => invoke('open_path', { path: p })
+      })
+    },
+    async _openWithFallback(opts: {
+      targetKind: 'launcher' | 'resource'
+      targetId: string
+      name: string
+      path: string
+      relPath: string | null
+      rootHint: string | null
+      open: (path: string) => Promise<unknown>
+    }) {
+      const settings = useSettingsStore()
+      const roots = settings.launcher.pathRoots ?? []
+      let resolved: ResolveEffectivePathResult
+      try {
+        resolved = await invoke<ResolveEffectivePathResult>('resolve_effective_path_cmd', {
+          path: opts.path,
+          relPath: opts.relPath,
+          rootHint: opts.rootHint,
+          roots
+        })
+      } catch (e) {
+        throw new Error(String(e))
+      }
+
+      if (resolved.status === 'missing') {
+        this.pathHealth[opts.targetId] = { status: 'missing', resolved: null }
+        throw new Error('路径失效，且无法通过相对路径恢复')
+      }
+
+      if (!resolved.used_relative) {
+        this.pathHealth[opts.targetId] = { status: 'ok', resolved: resolved.path }
+        await opts.open(resolved.path)
+        return
+      }
+
+      // 相对可用、绝对失效
+      if (settings.launcher.autoRepairPaths) {
+        await this.applyPathRepair(opts.targetKind, opts.targetId, resolved.path)
+        await opts.open(resolved.path)
+        return
+      }
+
+      if (!opts.targetId) {
+        // 无持久化目标（扫描临时项）：仅本次启动
+        await opts.open(resolved.path)
+        return
+      }
+
+      const choice = await this._askPathRepair({
+        targetKind: opts.targetKind,
+        targetId: opts.targetId,
+        name: opts.name,
+        oldPath: opts.path,
+        newPath: resolved.path,
+        continueOpen: true
+      })
+      if (choice === 'cancel') return
+      if (choice === 'repair-open') {
+        await this.applyPathRepair(opts.targetKind, opts.targetId, resolved.path)
+      }
+      await opts.open(resolved.path)
+    },
+    _askPathRepair(req: PendingPathRepair): Promise<RepairChoice> {
+      return new Promise((resolve) => {
+        this.pathRepairResolver = resolve
+        this.pendingPathRepair = req
+      })
+    },
+    resolvePendingPathRepair(choice: RepairChoice) {
+      const resolve = this.pathRepairResolver
+      this.pathRepairResolver = null
+      this.pendingPathRepair = null
+      resolve?.(choice)
+    },
+    async applyPathRepair(
+      targetKind: 'launcher' | 'resource',
+      targetId: string,
+      newPath: string
+    ) {
+      const rel = await this._computeRel(newPath)
+      if (targetKind === 'launcher') {
+        const it = this.items.find((x) => x.id === targetId)
+        if (!it) return
+        it.path = newPath
+        it.relPath = rel.relPath
+        it.rootHint = rel.rootHint
+        // 仅重解析 .lnk 元数据；不改写 iconData
+        if (/\.lnk$/i.test(newPath)) {
+          try {
+            const e = await invoke<ShortcutEntry>('resolve_shortcut', { path: newPath })
+            it.target = e.target ?? it.target
+            it.iconPath = e.icon_path ?? it.iconPath
+          } catch {
+            // silent
+          }
+        }
+      } else {
+        const r = this.resources.find((x) => x.id === targetId)
+        if (!r) return
+        r.path = newPath
+        r.relPath = rel.relPath
+        r.rootHint = rel.rootHint
+      }
+      this.pathHealth[targetId] = { status: 'ok', resolved: newPath }
+      await this.persist()
+    },
+    async repairItemById(targetId: string) {
+      const health = this.pathHealth[targetId]
+      const resolved = health?.resolved
+      if (!resolved) return
+      const isLauncher = this.items.some((x) => x.id === targetId)
+      await this.applyPathRepair(isLauncher ? 'launcher' : 'resource', targetId, resolved)
+    },
+    async checkHealth() {
+      if (!('__TAURI_INTERNALS__' in window)) return
+      const settings = useSettingsStore()
+      const roots = settings.launcher.pathRoots ?? []
+      const items: PathCheckItem[] = [
+        ...this.items.map((it) => ({
+          id: it.id,
+          kind: 'launcher' as const,
+          path: it.path,
+          rel_path: it.relPath ?? null,
+          root_hint: it.rootHint ?? null
+        })),
+        ...this.resources.map((r) => ({
+          id: r.id,
+          kind: r.kind,
+          path: r.path,
+          rel_path: r.relPath ?? null,
+          root_hint: r.rootHint ?? null
+        }))
+      ]
+      if (!items.length) {
+        this.pathHealth = {}
+        return
+      }
+      this.checkingPaths = true
+      try {
+        const chunkSize = 80
+        const next: Record<string, PathHealth> = {}
+        for (let i = 0; i < items.length; i += chunkSize) {
+          const chunk = items.slice(i, i + chunkSize)
+          const results = await invoke<PathCheckResult[]>('check_paths_cmd', { items: chunk, roots })
+          for (const r of results) {
+            next[r.id] = { status: r.status, resolved: r.resolved ?? null }
+          }
+        }
+        this.pathHealth = next
+
+        if (settings.launcher.autoRepairPaths) {
+          for (const [id, h] of Object.entries(next)) {
+            if (h.status === 'recoverable' && h.resolved) {
+              const isLauncher = this.items.some((x) => x.id === id)
+              await this.applyPathRepair(isLauncher ? 'launcher' : 'resource', id, h.resolved)
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[launcher] checkHealth failed:', e)
+      } finally {
+        this.checkingPaths = false
+      }
+    },
+    async backfillRelPaths(): Promise<number> {
+      const roots = useSettingsStore().launcher.pathRoots ?? []
+      if (!roots.length) return 0
+      let changed = 0
+      for (const it of this.items) {
+        const rel = await this._computeRel(it.path)
+        if (rel.relPath !== (it.relPath ?? null) || rel.rootHint !== (it.rootHint ?? null)) {
+          it.relPath = rel.relPath
+          it.rootHint = rel.rootHint
+          changed++
+        }
+      }
+      for (const r of this.resources) {
+        if (r.kind === 'url') continue
+        const rel = await this._computeRel(r.path)
+        if (rel.relPath !== (r.relPath ?? null) || rel.rootHint !== (r.rootHint ?? null)) {
+          r.relPath = rel.relPath
+          r.rootHint = rel.rootHint
+          changed++
+        }
+      }
+      if (changed) await this.persist()
+      return changed
     }
   }
 })

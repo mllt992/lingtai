@@ -104,3 +104,49 @@ a:hover {
   -webkit-app-region: no-drag;
   app-region: no-drag;
 }
+
+/* ---------- Mini 密度：壳层与页面共用，不另起主题 ---------- */
+html[data-ui-mode='mini'] .page-header {
+  padding: 10px 12px 6px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+html[data-ui-mode='mini'] .page-header h1 {
+  font-size: 15px;
+}
+html[data-ui-mode='mini'] .page-header p {
+  display: none;
+}
+html[data-ui-mode='mini'] .page-header .right {
+  gap: 6px;
+  width: 100%;
+  justify-content: flex-start;
+}
+html[data-ui-mode='mini'] .btn-text {
+  display: none;
+}
+html[data-ui-mode='mini'] .search {
+  min-width: 0;
+  flex: 1;
+  height: 32px;
+}
+html[data-ui-mode='mini'] .toggle span {
+  display: none;
+}
+
+html[data-ui-mode='mini'] .dialog,
+html[data-ui-mode='mini'] .modal {
+  max-width: calc(100vw - 16px);
+}
+html[data-ui-mode='mini'] .dialog.sheet {
+  width: 100% !important;
+  height: 100% !important;
+  max-width: none;
+  max-height: none;
+  border-radius: 0 !important;
+  box-shadow: none;
+}
+html[data-ui-mode='mini'] .empty-state {
+  padding: 36px 12px;
+}

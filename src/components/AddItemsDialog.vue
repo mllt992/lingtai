@@ -121,7 +121,7 @@ const canConfirm = computed(() => {
 <template>
   <transition name="dlg">
     <div v-if="open" class="mask" @click.self="emit('close')">
-      <div class="dialog">
+      <div class="dialog sheet">
         <header>
           <h2>添加到启动器</h2>
           <button class="x" @click="emit('close')">

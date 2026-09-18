@@ -29,6 +29,12 @@ export const router = createRouter({
       meta: { title: '端口监控', icon: 'i-carbon-network-1' }
     },
     {
+      path: '/env',
+      name: 'env',
+      component: () => import('@/views/EnvView.vue'),
+      meta: { title: '环境变量', icon: 'i-carbon-data-set' }
+    },
+    {
       path: '/settings',
       name: 'settings',
       component: () => import('@/views/SettingsView.vue'),

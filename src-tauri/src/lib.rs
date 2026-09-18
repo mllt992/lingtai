@@ -82,6 +82,21 @@ fn run_metrics_tick(app_handle: &tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if let Some(payload) = commands::env::elevate_payload_arg() {
+        diag::attach_console();
+        let code = match commands::env::run_elevate_helper(&payload) {
+            Ok(()) => {
+                log_step("env elevate helper: ok");
+                0
+            }
+            Err(e) => {
+                log_step(&format!("env elevate helper: {e}"));
+                1
+            }
+        };
+        std::process::exit(code);
+    }
+
     diag::attach_console();
     install_crash_logger();
     log_step("=== Loft starting ===");
@@ -169,6 +184,33 @@ pub fn run() {
                 spawn_metrics_loop(app.handle().clone());
 
                 log_step("setup: complete");
+
+                if let Some(window) = app.get_webview_window("main") {
+                    match window.url() {
+                        Ok(url) => log_step(&format!("setup: main url = {}", url)),
+                        Err(e) => log_step(&format!("setup: main url error = {}", e)),
+                    }
+                } else {
+                    log_step("setup: WARN main window missing");
+                }
+
+                // 主窗 conf 里是 visible:true。若异常仍不可见，延迟 show。
+                let app_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        let visible = window.is_visible().unwrap_or(true);
+                        let url = window
+                            .url()
+                            .map(|u| u.to_string())
+                            .unwrap_or_else(|e| format!("err:{e}"));
+                        log_step(&format!("late: visible={} url={}", visible, url));
+                        if !visible {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                });
                 Ok(())
             })
             .on_window_event(|window, event| {
@@ -183,6 +225,9 @@ pub fn run() {
                 commands::launcher::scan_start_menu,
                 commands::launcher::resolve_shortcut,
                 commands::launcher::launch_path,
+                commands::path_resolve::compute_rel_path_cmd,
+                commands::path_resolve::resolve_effective_path_cmd,
+                commands::path_resolve::check_paths_cmd,
                 commands::files::open_path,
                 commands::files::reveal_in_explorer,
                 commands::files::open_url,
@@ -195,6 +240,12 @@ pub fn run() {
                 commands::settings::save_settings,
                 commands::settings::load_items,
                 commands::settings::save_items,
+                commands::env::list_env_vars,
+                commands::env::get_env_value,
+                commands::env::upsert_env_var,
+                commands::env::delete_env_var,
+                commands::env::load_env_notes,
+                commands::env::save_env_notes,
             ])
             .run(tauri::generate_context!())
     }));

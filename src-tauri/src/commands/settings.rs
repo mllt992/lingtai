@@ -75,7 +75,15 @@ fn default_settings() -> Value {
         },
         "launcher": {
             "autoScan": true,
-            "extraPaths": []
+            "extraPaths": [],
+            "pathRoots": [],
+            "autoRepairPaths": false
+        },
+        "ui": {
+            "windowMode": "mini",
+            "alwaysOnTop": false,
+            "mini": { "x": null, "y": null, "w": 400, "h": 560 },
+            "expanded": { "x": null, "y": null, "w": 980, "h": 680 }
         }
     })
 }

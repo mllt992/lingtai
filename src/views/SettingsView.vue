@@ -1,16 +1,21 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { useSettingsStore, THEME_PRESETS } from '@/stores/settings'
 import { useMonitorStore } from '@/stores/monitor'
 import { usePortsStore } from '@/stores/ports'
+import { useLauncherStore } from '@/stores/launcher'
 import PageHeader from '@/components/PageHeader.vue'
 
 const settings = useSettingsStore()
 const monitor = useMonitorStore()
 const ports = usePortsStore()
+const launcher = useLauncherStore()
 
 const monitorMs = ref(settings.monitor.refreshMs)
 const portsMs = ref(settings.ports.refreshMs)
+const newRoot = ref('')
+const backfillMsg = ref('')
 
 watch(
   () => settings.loaded,
@@ -49,6 +54,54 @@ async function toggleSystemPorts(v: boolean) {
     ports: { ...settings.ports, includeSystem: v }
   })
   ports.setIncludeSystem(v)
+}
+
+async function toggleAutoRepair(v: boolean) {
+  await settings.setAutoRepairPaths(v)
+  if (v) void launcher.checkHealth()
+}
+
+async function pickRootDir() {
+  const picked = await openDialog({
+    directory: true,
+    multiple: false,
+    title: '选择路径根目录'
+  })
+  if (typeof picked === 'string' && picked.trim()) {
+    newRoot.value = picked.trim()
+  }
+}
+
+async function addPathRoot() {
+  const v = newRoot.value.trim()
+  if (!v) return
+  const exists = settings.launcher.pathRoots.some(
+    (r) => r.toLowerCase().replace(/\\/g, '/') === v.toLowerCase().replace(/\\/g, '/')
+  )
+  if (exists) {
+    newRoot.value = ''
+    return
+  }
+  await settings.setPathRoots([...settings.launcher.pathRoots, v])
+  newRoot.value = ''
+  void launcher.checkHealth()
+}
+
+async function removePathRoot(root: string) {
+  await settings.setPathRoots(settings.launcher.pathRoots.filter((r) => r !== root))
+  void launcher.checkHealth()
+}
+
+async function backfillRelPaths() {
+  backfillMsg.value = '处理中…'
+  try {
+    if (!launcher.items.length && !launcher.resources.length) await launcher.load()
+    const n = await launcher.backfillRelPaths()
+    backfillMsg.value = n > 0 ? `已回填 ${n} 条` : '无需回填（无匹配根或已最新）'
+  } catch (e) {
+    backfillMsg.value = `回填失败：${String(e)}`
+  }
+  setTimeout(() => (backfillMsg.value = ''), 4000)
 }
 
 const accentInput = ref(settings.accent)
@@ -167,6 +220,51 @@ const currentMode = computed(() => settings.currentPreset.mode)
         </div>
       </section>
 
+      <section class="block">
+        <h3><span class="i-carbon-folder" /> 路径根目录</h3>
+        <p class="desc">
+          启动项/资源若位于根目录下，会额外记录相对路径。绝对路径失效时，用「根 + 相对路径」回退；
+          <strong>只修复主路径</strong>，不改写已缓存图标。网址资源不参与。
+        </p>
+        <div class="roots">
+          <div v-for="r in settings.launcher.pathRoots" :key="r" class="root-row">
+            <code class="mono">{{ r }}</code>
+            <button class="btn-ghost sm" title="移除" @click="removePathRoot(r)">
+              <span class="i-carbon-trash-can" />
+            </button>
+          </div>
+          <p v-if="!settings.launcher.pathRoots.length" class="desc">尚未配置根目录。可添加便携软件目录、同步盘目录等。</p>
+        </div>
+        <div class="control-row">
+          <input
+            v-model="newRoot"
+            class="text-input"
+            placeholder="例如 D:\Portable"
+            @keydown.enter="addPathRoot"
+          />
+          <button class="btn-ghost" @click="pickRootDir">浏览…</button>
+          <button class="btn-primary" :disabled="!newRoot.trim()" @click="addPathRoot">添加根目录</button>
+        </div>
+        <div class="control-row">
+          <label>自动修复路径</label>
+          <label class="switch">
+            <input
+              type="checkbox"
+              :checked="settings.launcher.autoRepairPaths"
+              @change="toggleAutoRepair(($event.target as HTMLInputElement).checked)"
+            />
+            <span class="track"><span class="thumb" /></span>
+          </label>
+          <span class="value">
+            {{ settings.launcher.autoRepairPaths ? '开启：相对可用时静默写回' : '关闭：启动时询问是否修复' }}
+          </span>
+        </div>
+        <div class="control-row">
+          <button class="btn-ghost" @click="backfillRelPaths">回填相对路径</button>
+          <span class="value">{{ backfillMsg }}</span>
+        </div>
+      </section>
+
       <section class="block about">
         <h3><span class="i-carbon-information" /> 关于</h3>
         <div class="grid-info">
@@ -174,6 +272,10 @@ const currentMode = computed(() => settings.currentPreset.mode)
           <div><span>版本</span><strong>v0.1.0</strong></div>
           <div><span>引擎</span><strong>Tauri 2 + Vue 3 + Rust</strong></div>
           <div><span>主题</span><strong>{{ settings.currentPreset.name }}</strong></div>
+          <div>
+            <span>窗口</span>
+            <strong>{{ settings.ui.windowMode === 'mini' ? '小窗' : '展开' }}{{ settings.ui.alwaysOnTop ? ' · 置顶' : '' }}</strong>
+          </div>
         </div>
       </section>
     </div>
@@ -342,6 +444,45 @@ const currentMode = computed(() => settings.currentPreset.mode)
 .value.mono {
   font-family: var(--font-mono);
 }
+.roots {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.root-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.root-row .mono {
+  font-size: 12px;
+  word-break: break-all;
+}
+.text-input {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text);
+  font-size: 12.5px;
+  outline: none;
+}
+.text-input:focus {
+  border-color: var(--accent);
+}
+.btn-ghost.sm {
+  height: 28px;
+  padding: 0 8px;
+}
 .btn-primary {
   display: inline-flex;
   align-items: center;
@@ -424,5 +565,26 @@ const currentMode = computed(() => settings.currentPreset.mode)
 .about .grid-info span {
   color: var(--text-muted);
   font-size: 11px;
+}
+
+:global(html[data-ui-mode='mini'] .body) {
+  padding: 8px 10px 16px;
+  gap: 12px;
+}
+:global(html[data-ui-mode='mini'] .themes) {
+  grid-template-columns: 1fr;
+}
+:global(html[data-ui-mode='mini'] .block) {
+  padding: 12px 12px;
+}
+:global(html[data-ui-mode='mini'] .control-row) {
+  flex-wrap: wrap;
+}
+:global(html[data-ui-mode='mini'] .control-row label) {
+  min-width: 0;
+}
+:global(html[data-ui-mode='mini'] .range) {
+  max-width: none;
+  min-width: 120px;
 }
 </style>

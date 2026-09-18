@@ -18,6 +18,7 @@ Loft = 干净、开阔的高层空间。
 - 📂 **资源归纳** —— 文件夹 / 文件 / 网址 三合一卡片，双击直达
 - 📊 **性能监控** —— CPU / 内存 / 交换 / 各核心 / 各磁盘 / GPU（NVIDIA 优先，WMI 兜底）实时折线
 - 🔌 **端口监控** —— 列出用户进程 LISTEN 端口，过滤系统噪声，一键定位 / 终止占用
+- 🧪 **环境变量** —— 用户 / 系统 / 进程三档，备注可编辑，一键复制值，支持增删改（系统级走 UAC）
 - 🎨 **6 套主题** —— Aurora 极光 · Carbon 碳灰 · Nord 北欧 · Vanilla 米白 · Solar 暖橙 · Mint 薄荷
 - 🪶 **轻量原生** —— Tauri 2 + Rust，安装包 ~10 MB，运行内存 ~40 MB
 
@@ -110,7 +111,7 @@ pnpm dev             # 仅前端开发服务器（不带 Tauri 壳）
 │   ├── App.vue
 │   ├── router/
 │   ├── stores/               # Pinia: settings / launcher / monitor / ports
-│   ├── views/                # 5 个主视图
+│   ├── views/                # 6 个主视图
 │   ├── components/           # TitleBar / Sidebar / StatCard / SparkLine ...
 │   ├── composables/          # useDrop 等
 │   ├── styles/               # themes.css + main.css
@@ -129,7 +130,8 @@ pnpm dev             # 仅前端开发服务器（不带 Tauri 壳）
             ├── files.rs      # 打开路径 / 网址 / 资源管理器定位
             ├── monitor.rs    # CPU / 内存 / 磁盘 / GPU 快照
             ├── ports.rs      # 端口枚举 / 进程关联 / kill
-            └── settings.rs   # 配置 / 启动项 / 资源 JSON 读写
+            ├── settings.rs   # 配置 / 启动项 / 资源 JSON 读写
+            └── env.rs        # 环境变量读写 / 备注 / UAC 提权
 ```
 
 ## 主题预设
@@ -151,6 +153,7 @@ pnpm dev             # 仅前端开发服务器（不带 Tauri 壳）
 |---|---|
 | `%APPDATA%\com.loft.app\config.json` | 主题 / 主色 / 刷新间隔 / 启动器选项 |
 | `%APPDATA%\com.loft.app\items.json` | 用户添加的启动项 + 资源（文件 / 文件夹 / 网址） |
+| `%APPDATA%\com.loft.app\env-notes.json` | 环境变量备注（不写入 Windows） |
 
 ## 隐私
 

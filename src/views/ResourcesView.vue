@@ -55,6 +55,12 @@ onMounted(async () => {
   await launcher.load()
 })
 
+function onOpen(item: ResourceItem) {
+  launcher.openResource(item).catch((e) => {
+    console.warn('[resources] open failed:', e)
+  })
+}
+
 useDrop(({ paths }) => {
   const target = launcher.sortedResourceGroups[0]
   if (!target) return
@@ -120,15 +126,23 @@ function showItemMenu(e: MouseEvent, item: ResourceItem) {
     {
       label: item.kind === 'url' ? '打开网址' : '打开',
       icon: 'i-carbon-launch',
-      onClick: () => launcher.openResource(item)
+      onClick: () => onOpen(item)
     }
   ]
   if (item.kind !== 'url') {
-    items.push({
-      label: '在资源管理器中显示',
-      icon: 'i-carbon-folder-open',
-      onClick: () => invoke('reveal_in_explorer', { path: item.path }).catch(() => {})
-    })
+    items.push(
+      {
+        label: '在资源管理器中显示',
+        icon: 'i-carbon-folder-open',
+        onClick: () => invoke('reveal_in_explorer', { path: item.path }).catch(() => {})
+      },
+      {
+        label: '修复路径',
+        icon: 'i-carbon-road',
+        disabled: launcher.pathHealth[item.id]?.status !== 'recoverable',
+        onClick: () => launcher.repairItemById(item.id)
+      }
+    )
   }
   const moveSubmenu: MenuItem[] = launcher.sortedResourceGroups
     .filter((g) => g.id !== item.groupId)
@@ -320,16 +334,16 @@ const empty = computed(() => totalItems.value === 0)
             })
           "
         >
-          <span class="i-carbon-folder-add" /> 新分组
+          <span class="i-carbon-folder-add" /> <span class="btn-text">新分组</span>
         </button>
         <button class="btn-ghost" @click="openAddDialog('folder')">
-          <span class="i-carbon-folder-add" /> 文件夹
+          <span class="i-carbon-folder-add" /> <span class="btn-text">文件夹</span>
         </button>
         <button class="btn-ghost" @click="openAddDialog('file')">
-          <span class="i-carbon-document-add" /> 文件
+          <span class="i-carbon-document-add" /> <span class="btn-text">文件</span>
         </button>
         <button class="btn-primary" @click="openAddDialog('url')">
-          <span class="i-carbon-link" /> 网址
+          <span class="i-carbon-link" /> <span class="btn-text">网址</span>
         </button>
       </template>
     </PageHeader>
@@ -382,7 +396,7 @@ const empty = computed(() => totalItems.value === 0)
               }"
               draggable="true"
               :title="item.path"
-              @dblclick="launcher.openResource(item)"
+              @dblclick="onOpen(item)"
               @contextmenu="showItemMenu($event, item)"
               @dragstart="onDragStart($event, item)"
               @dragend="onDragEnd"
@@ -396,6 +410,16 @@ const empty = computed(() => totalItems.value === 0)
                 <div class="name">{{ item.name }}</div>
                 <div class="path">{{ item.path }}</div>
               </div>
+              <span
+                v-if="item.kind !== 'url' && launcher.pathHealth[item.id]?.status === 'missing'"
+                class="path-badge missing"
+                title="路径失效"
+              />
+              <span
+                v-else-if="item.kind !== 'url' && launcher.pathHealth[item.id]?.status === 'recoverable'"
+                class="path-badge recoverable"
+                title="绝对路径失效，相对路径可用，可右键修复"
+              />
             </div>
             <button
               v-if="(launcher.resourcesByGroup[group.id] ?? []).length === 0"
@@ -737,6 +761,21 @@ const empty = computed(() => totalItems.value === 0)
   font-family: var(--font-mono);
   margin-top: 2px;
 }
+.path-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--bg-elev);
+}
+.path-badge.missing {
+  background: var(--danger, #ef4444);
+}
+.path-badge.recoverable {
+  background: var(--warning, #f59e0b);
+}
 
 .empty-slot {
   display: flex;
@@ -903,5 +942,20 @@ const empty = computed(() => totalItems.value === 0)
 .slide-enter-to, .slide-leave-from {
   opacity: 1;
   max-height: 1500px;
+}
+
+:global(html[data-ui-mode='mini'] .body) {
+  padding: 8px 10px 16px;
+}
+:global(html[data-ui-mode='mini'] .grid) {
+  grid-template-columns: 1fr;
+}
+:global(html[data-ui-mode='mini'] .search) {
+  min-width: 0;
+}
+:global(html[data-ui-mode='mini'] .btn-ghost),
+:global(html[data-ui-mode='mini'] .btn-primary) {
+  height: 32px;
+  padding: 0 10px;
 }
 </style>

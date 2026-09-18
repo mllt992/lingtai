@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, provide } from 'vue'
 import TitleBar from '@/components/TitleBar.vue'
 import Sidebar from '@/components/Sidebar.vue'
+import MiniNav from '@/components/MiniNav.vue'
+import PathRepairDialog from '@/components/PathRepairDialog.vue'
 import HudView from '@/views/HudView.vue'
 import { useSettingsStore } from '@/stores/settings'
+import { useWindowMode, windowModeKey } from '@/composables/useWindowMode'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 
 const settings = useSettingsStore()
-// 通过 Tauri window label 判定当前窗口
 let detectedLabel = 'main'
 try {
   detectedLabel = getCurrentWindow().label
@@ -15,20 +17,24 @@ try {
   // 浏览器 dev 环境，按主窗口处理
 }
 const isHud = computed(() => detectedLabel === 'hud')
+const windowMode = useWindowMode()
+const { mode, isMini, init } = windowMode
+provide(windowModeKey, windowMode)
 
 onMounted(async () => {
-  if (!isHud.value) {
-    await settings.load()
-  }
+  if (isHud.value) return
+  await settings.load()
+  await init()
 })
 </script>
 
 <template>
   <HudView v-if="isHud" />
-  <div v-else class="app-shell">
+  <div v-else class="app-shell" :data-ui-mode="mode">
     <TitleBar />
+    <MiniNav v-if="isMini" />
     <div class="app-body">
-      <Sidebar />
+      <Sidebar v-if="!isMini" />
       <main class="app-main">
         <router-view v-slot="{ Component, route }">
           <transition name="fade" mode="out-in">
@@ -37,6 +43,7 @@ onMounted(async () => {
         </router-view>
       </main>
     </div>
+    <PathRepairDialog />
   </div>
 </template>
 

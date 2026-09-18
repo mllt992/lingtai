@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { invoke } from '@tauri-apps/api/core'
-import type { AppSettings, ThemeId, ThemePreset } from '@/types'
+import type { AppSettings, ThemeId, ThemePreset, UiSettings } from '@/types'
 
 export const THEME_PRESETS: ThemePreset[] = [
   {
@@ -47,13 +47,37 @@ export const THEME_PRESETS: ThemePreset[] = [
   }
 ]
 
+export const DEFAULT_UI: UiSettings = {
+  windowMode: 'mini',
+  alwaysOnTop: false,
+  mini: { x: null, y: null, w: 400, h: 560 },
+  expanded: { x: null, y: null, w: 980, h: 680 }
+}
+
+const DEFAULT_LAUNCHER = {
+  autoScan: true,
+  extraPaths: [] as string[],
+  pathRoots: [] as string[],
+  autoRepairPaths: false
+}
+
 const DEFAULTS: AppSettings = {
   version: 1,
   theme: 'aurora',
   accent: '#5b8cff',
   ports: { refreshMs: 5000, includeSystem: false },
   monitor: { refreshMs: 1000, historyLen: 60 },
-  launcher: { autoScan: true, extraPaths: [] }
+  launcher: { ...DEFAULT_LAUNCHER, extraPaths: [], pathRoots: [] },
+  ui: { ...DEFAULT_UI, mini: { ...DEFAULT_UI.mini }, expanded: { ...DEFAULT_UI.expanded } }
+}
+
+function mergeUi(raw: Partial<UiSettings> | undefined): UiSettings {
+  return {
+    windowMode: raw?.windowMode === 'expanded' ? 'expanded' : 'mini',
+    alwaysOnTop: Boolean(raw?.alwaysOnTop),
+    mini: { ...DEFAULT_UI.mini, ...(raw?.mini ?? {}) },
+    expanded: { ...DEFAULT_UI.expanded, ...(raw?.expanded ?? {}) }
+  }
 }
 
 function applyTheme(theme: ThemeId, accent: string) {
@@ -71,6 +95,7 @@ function applyTheme(theme: ThemeId, accent: string) {
 export const useSettingsStore = defineStore('settings', {
   state: (): AppSettings & { loaded: boolean } => ({
     ...DEFAULTS,
+    ui: mergeUi(undefined),
     loaded: false
   }),
   getters: {
@@ -84,7 +109,19 @@ export const useSettingsStore = defineStore('settings', {
     async load() {
       try {
         const cfg = await invoke<AppSettings>('load_settings')
-        Object.assign(this, { ...DEFAULTS, ...cfg, loaded: true })
+        Object.assign(this, {
+          ...DEFAULTS,
+          ...cfg,
+          launcher: {
+            ...DEFAULT_LAUNCHER,
+            ...(cfg.launcher ?? {}),
+            extraPaths: cfg.launcher?.extraPaths ?? [],
+            pathRoots: cfg.launcher?.pathRoots ?? [],
+            autoRepairPaths: Boolean(cfg.launcher?.autoRepairPaths)
+          },
+          ui: mergeUi(cfg.ui),
+          loaded: true
+        })
       } catch (e) {
         console.warn('[settings] load failed, using defaults:', e)
         this.loaded = true
@@ -108,7 +145,22 @@ export const useSettingsStore = defineStore('settings', {
       applyTheme(this.theme, this.accent)
       await this.persist()
     },
+    async setPathRoots(roots: string[]) {
+      const cleaned = roots.map((r) => r.trim()).filter(Boolean)
+      await this.patch({
+        launcher: { ...this.launcher, pathRoots: cleaned }
+      })
+    },
+    async setAutoRepairPaths(enabled: boolean) {
+      await this.patch({
+        launcher: { ...this.launcher, autoRepairPaths: enabled }
+      })
+    },
     async persist() {
+      if (!('__TAURI_INTERNALS__' in window)) {
+        console.warn('[settings] persist skipped: no Tauri internals')
+        return
+      }
       const { loaded, ...settings } = this.$state as AppSettings & {
         loaded: boolean
       }

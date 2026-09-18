@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "pnpm dev",
     "beforeBuildCommand": "pnpm build",
-    "devUrl": "http://localhost:1620",
+    "devUrl": "http://127.0.0.1:1620",
     "frontendDist": "../dist"
   },
   "app": {
@@ -14,15 +14,16 @@
       {
         "label": "main",
         "title": "凌台 · Loft",
-        "width": 1180,
-        "height": 760,
-        "minWidth": 920,
-        "minHeight": 600,
+        "width": 400,
+        "height": 560,
+        "minWidth": 360,
+        "minHeight": 440,
         "decorations": false,
         "transparent": false,
         "resizable": true,
         "fullscreen": false,
-        "center": true
+        "center": false,
+        "visible": true
       },
       {
         "label": "hud",
